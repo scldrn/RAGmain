@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import os
 from dataclasses import dataclass
 from typing import Any, Optional
 
@@ -10,9 +9,14 @@ from agentic_rag.documents import preprocess_documents
 from agentic_rag.graph import (
     build_agentic_rag_graph,
     build_retriever,
-    create_chat_model,
     create_retriever_tool,
     message_text,
+)
+from agentic_rag.providers import (
+    create_chat_model,
+    create_embeddings,
+    resolve_chat_config,
+    resolve_embedding_config,
 )
 from agentic_rag.settings import AgenticRagSettings
 
@@ -24,38 +28,26 @@ class AgenticRagApp:
     document_count: int
 
 
-def ensure_google_api_key() -> None:
-    """Fail early when the Google AI Studio API key is missing."""
-    google_api_key = os.getenv("GOOGLE_API_KEY")
-    gemini_api_key = os.getenv("GEMINI_API_KEY")
-
-    if not (google_api_key or gemini_api_key):
-        raise RuntimeError(
-            "GOOGLE_API_KEY or GEMINI_API_KEY is not set. Export one of them before running the agentic RAG CLI."
-        )
-
-    if not google_api_key and gemini_api_key:
-        os.environ["GOOGLE_API_KEY"] = gemini_api_key
-
-
 def create_agentic_rag_app(settings: Optional[AgenticRagSettings] = None) -> AgenticRagApp:
     """Build the full Agentic RAG application from the configured sources."""
     settings = settings or AgenticRagSettings()
-    ensure_google_api_key()
+    chat_config = resolve_chat_config(settings)
+    embedding_config = resolve_embedding_config(settings, chat_config)
 
     documents = preprocess_documents(
         settings.source_urls,
         chunk_size=settings.chunk_size,
         chunk_overlap=settings.chunk_overlap,
     )
+    embeddings = create_embeddings(embedding_config)
     retriever = build_retriever(
         documents,
-        embedding_model=settings.embedding_model,
+        embeddings=embeddings,
         retrieval_k=settings.retrieval_k,
     )
     retriever_tool = create_retriever_tool(retriever)
-    response_model = create_chat_model(settings.chat_model)
-    grader_model = create_chat_model(settings.chat_model)
+    response_model = create_chat_model(chat_config)
+    grader_model = create_chat_model(chat_config)
     graph = build_agentic_rag_graph(
         response_model=response_model,
         grader_model=grader_model,

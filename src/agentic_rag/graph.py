@@ -6,6 +6,7 @@ from langchain_core.documents import Document
 from langchain_core.messages import BaseMessage, HumanMessage
 from langchain_core.retrievers import BaseRetriever
 from langchain_core.tools import BaseTool, tool
+from langchain_core.embeddings import Embeddings
 from langchain_core.vectorstores import InMemoryVectorStore
 from langgraph.graph import END, START, MessagesState, StateGraph
 from langgraph.prebuilt import ToolNode, tools_condition
@@ -95,15 +96,13 @@ def format_retrieved_documents(documents: Sequence[Document]) -> str:
 def build_retriever(
     documents: Sequence[Document],
     *,
-    embedding_model: str,
+    embeddings: Embeddings,
     retrieval_k: int,
 ) -> BaseRetriever:
     """Create an in-memory vector retriever from chunked documents."""
-    from langchain_google_genai import GoogleGenerativeAIEmbeddings
-
     vectorstore = InMemoryVectorStore.from_documents(
         documents=list(documents),
-        embedding=GoogleGenerativeAIEmbeddings(model=embedding_model),
+        embedding=embeddings,
     )
     return vectorstore.as_retriever(search_kwargs={"k": retrieval_k})
 
@@ -118,17 +117,6 @@ def create_retriever_tool(retriever: BaseRetriever) -> BaseTool:
         return format_retrieved_documents(documents)
 
     return retrieve_blog_posts
-
-
-def create_chat_model(model_name: str):
-    """Initialize a Gemini chat model using Google AI Studio credentials."""
-    from langchain_google_genai import ChatGoogleGenerativeAI
-
-    return ChatGoogleGenerativeAI(
-        model=model_name,
-        temperature=0,
-    )
-
 
 def make_generate_query_or_respond(response_model, retriever_tool: BaseTool):
     """Create the node that decides between direct response and retrieval."""
