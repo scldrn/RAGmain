@@ -1,0 +1,33 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "agentic-rag"
+version = "0.1.0"
+description = "Agentic RAG project built with LangGraph and LangChain."
+requires-python = ">=3.9"
+dependencies = [
+  "beautifulsoup4>=4.12.0",
+  "langchain[openai]>=0.3.0,<1.0.0",
+  "langchain-community>=0.3.0,<1.0.0",
+  "langchain-openai>=0.2.0,<1.0.0",
+  "langchain-text-splitters>=0.3.0,<1.0.0",
+  "langgraph>=0.2.0,<1.0.0",
+  "urllib3<2",
+]
+
+[project.optional-dependencies]
+dev = [
+  "pytest>=8.0.0",
+]
+
+[project.scripts]
+agentic-rag = "agentic_rag.cli:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+pythonpath = ["src"]
+testpaths = ["tests"]
