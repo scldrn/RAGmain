@@ -99,9 +99,9 @@ def default_embedding_model() -> Optional[str]:
 @dataclass(frozen=True)
 class AgenticRagSettings:
     source_urls: Sequence[str] = field(default_factory=lambda: DEFAULT_SOURCE_URLS)
-    chunk_size: int = 100
-    chunk_overlap: int = 50
-    retrieval_k: int = 4
+    chunk_size: int = 1200
+    chunk_overlap: int = 200
+    retrieval_k: int = 6
     chat_provider: str = field(default_factory=default_chat_provider)
     chat_model: str = field(default_factory=default_chat_model)
     chat_api_key: Optional[str] = field(
@@ -128,4 +128,7 @@ class AgenticRagSettings:
     )
     embedding_api_base: Optional[str] = field(
         default_factory=lambda: os.getenv("EMBEDDING_API_BASE")
+    )
+    index_cache_dir: str = field(
+        default_factory=lambda: os.getenv("INDEX_CACHE_DIR", ".cache/vectorstores")
     )

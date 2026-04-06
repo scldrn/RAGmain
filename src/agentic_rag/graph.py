@@ -100,11 +100,20 @@ def build_retriever(
     retrieval_k: int,
 ) -> BaseRetriever:
     """Create an in-memory vector retriever from chunked documents."""
-    vectorstore = InMemoryVectorStore.from_documents(
+    vectorstore = build_vectorstore(documents, embeddings=embeddings)
+    return vectorstore.as_retriever(search_kwargs={"k": retrieval_k})
+
+
+def build_vectorstore(
+    documents: Sequence[Document],
+    *,
+    embeddings: Embeddings,
+) -> InMemoryVectorStore:
+    """Create an in-memory vector store from chunked documents."""
+    return InMemoryVectorStore.from_documents(
         documents=list(documents),
         embedding=embeddings,
     )
-    return vectorstore.as_retriever(search_kwargs={"k": retrieval_k})
 
 
 def create_retriever_tool(retriever: BaseRetriever) -> BaseTool:

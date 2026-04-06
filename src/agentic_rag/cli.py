@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import os
+import warnings
 
 from agentic_rag.app import create_agentic_rag_app, export_graph_mermaid, run_question
 from agentic_rag.graph import message_text
@@ -10,6 +11,23 @@ from agentic_rag.settings import (
     SUPPORTED_EMBEDDING_PROVIDERS,
     AgenticRagSettings,
 )
+
+
+def configure_runtime_warnings() -> None:
+    """Reduce low-signal dependency warnings during normal CLI usage."""
+    if os.getenv("AGENTIC_RAG_DEBUG"):
+        return
+
+    warning_patterns = (
+        r".*non-supported Python version.*",
+        r".*Python version 3\.9 past its end of life.*",
+    )
+    for pattern in warning_patterns:
+        warnings.filterwarnings(
+            "ignore",
+            message=pattern,
+            category=FutureWarning,
+        )
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -30,19 +48,19 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--chunk-size",
         type=int,
-        default=100,
+        default=None,
         help="Chunk size used during document splitting.",
     )
     parser.add_argument(
         "--chunk-overlap",
         type=int,
-        default=50,
+        default=None,
         help="Chunk overlap used during document splitting.",
     )
     parser.add_argument(
         "--retrieval-k",
         type=int,
-        default=4,
+        default=None,
         help="Number of chunks returned by the retriever.",
     )
     parser.add_argument(
@@ -123,9 +141,11 @@ def build_settings(args: argparse.Namespace) -> AgenticRagSettings:
     base = AgenticRagSettings()
     return AgenticRagSettings(
         source_urls=args.source_urls or base.source_urls,
-        chunk_size=args.chunk_size,
-        chunk_overlap=args.chunk_overlap,
-        retrieval_k=args.retrieval_k,
+        chunk_size=args.chunk_size if args.chunk_size is not None else base.chunk_size,
+        chunk_overlap=(
+            args.chunk_overlap if args.chunk_overlap is not None else base.chunk_overlap
+        ),
+        retrieval_k=args.retrieval_k if args.retrieval_k is not None else base.retrieval_k,
         chat_provider=args.chat_provider or base.chat_provider,
         chat_model=args.chat_model or base.chat_model,
         chat_api_key=args.chat_api_key or base.chat_api_key,
@@ -141,10 +161,12 @@ def build_settings(args: argparse.Namespace) -> AgenticRagSettings:
         embedding_api_key=args.embedding_api_key or base.embedding_api_key,
         embedding_api_key_env=args.embedding_api_key_env or base.embedding_api_key_env,
         embedding_api_base=args.embedding_api_base or base.embedding_api_base,
+        index_cache_dir=base.index_cache_dir,
     )
 
 
 def main() -> int:
+    configure_runtime_warnings()
     parser = build_parser()
     args = parser.parse_args()
     settings = build_settings(args)
