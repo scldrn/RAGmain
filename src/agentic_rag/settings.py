@@ -18,11 +18,10 @@ class AgenticRagSettings:
     chunk_overlap: int = 50
     retrieval_k: int = 4
     chat_model: str = field(
-        default_factory=lambda: os.getenv("OPENAI_CHAT_MODEL", "gpt-4.1-mini")
+        default_factory=lambda: os.getenv("GOOGLE_CHAT_MODEL", "gemini-2.5-flash")
     )
     embedding_model: str = field(
         default_factory=lambda: os.getenv(
-            "OPENAI_EMBEDDING_MODEL", "text-embedding-3-small"
+            "GOOGLE_EMBEDDING_MODEL", "gemini-embedding-2-preview"
         )
     )
-

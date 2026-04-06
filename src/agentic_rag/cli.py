@@ -43,12 +43,12 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--chat-model",
         default=None,
-        help="OpenAI chat model to use. Defaults to OPENAI_CHAT_MODEL or gpt-4.1-mini.",
+        help="Gemini chat model to use. Defaults to GOOGLE_CHAT_MODEL or gemini-2.5-flash.",
     )
     parser.add_argument(
         "--embedding-model",
         default=None,
-        help="OpenAI embedding model to use. Defaults to OPENAI_EMBEDDING_MODEL or text-embedding-3-small.",
+        help="Gemini embedding model to use. Defaults to GOOGLE_EMBEDDING_MODEL or gemini-embedding-2-preview.",
     )
     parser.add_argument(
         "--show-steps",

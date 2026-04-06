@@ -24,18 +24,24 @@ class AgenticRagApp:
     document_count: int
 
 
-def ensure_openai_api_key() -> None:
-    """Fail early when the OpenAI API key is missing."""
-    if not os.getenv("OPENAI_API_KEY"):
+def ensure_google_api_key() -> None:
+    """Fail early when the Google AI Studio API key is missing."""
+    google_api_key = os.getenv("GOOGLE_API_KEY")
+    gemini_api_key = os.getenv("GEMINI_API_KEY")
+
+    if not (google_api_key or gemini_api_key):
         raise RuntimeError(
-            "OPENAI_API_KEY is not set. Export it before running the agentic RAG CLI."
+            "GOOGLE_API_KEY or GEMINI_API_KEY is not set. Export one of them before running the agentic RAG CLI."
         )
+
+    if not google_api_key and gemini_api_key:
+        os.environ["GOOGLE_API_KEY"] = gemini_api_key
 
 
 def create_agentic_rag_app(settings: Optional[AgenticRagSettings] = None) -> AgenticRagApp:
     """Build the full Agentic RAG application from the configured sources."""
     settings = settings or AgenticRagSettings()
-    ensure_openai_api_key()
+    ensure_google_api_key()
 
     documents = preprocess_documents(
         settings.source_urls,
@@ -91,4 +97,3 @@ def export_graph_mermaid(app: AgenticRagApp, output_path: str) -> None:
     mermaid = app.graph.get_graph().draw_mermaid()
     with open(output_path, "w", encoding="utf-8") as handle:
         handle.write(mermaid)
-

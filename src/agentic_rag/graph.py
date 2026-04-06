@@ -2,13 +2,11 @@ from __future__ import annotations
 
 from typing import Literal, Sequence
 
-from langchain.chat_models import init_chat_model
 from langchain_core.documents import Document
 from langchain_core.messages import BaseMessage, HumanMessage
 from langchain_core.retrievers import BaseRetriever
 from langchain_core.tools import BaseTool, tool
 from langchain_core.vectorstores import InMemoryVectorStore
-from langchain_openai import OpenAIEmbeddings
 from langgraph.graph import END, START, MessagesState, StateGraph
 from langgraph.prebuilt import ToolNode, tools_condition
 from pydantic import BaseModel, Field
@@ -101,9 +99,11 @@ def build_retriever(
     retrieval_k: int,
 ) -> BaseRetriever:
     """Create an in-memory vector retriever from chunked documents."""
+    from langchain_google_genai import GoogleGenerativeAIEmbeddings
+
     vectorstore = InMemoryVectorStore.from_documents(
         documents=list(documents),
-        embedding=OpenAIEmbeddings(model=embedding_model),
+        embedding=GoogleGenerativeAIEmbeddings(model=embedding_model),
     )
     return vectorstore.as_retriever(search_kwargs={"k": retrieval_k})
 
@@ -121,10 +121,11 @@ def create_retriever_tool(retriever: BaseRetriever) -> BaseTool:
 
 
 def create_chat_model(model_name: str):
-    """Initialize a chat model using the OpenAI provider."""
-    return init_chat_model(
+    """Initialize a Gemini chat model using Google AI Studio credentials."""
+    from langchain_google_genai import ChatGoogleGenerativeAI
+
+    return ChatGoogleGenerativeAI(
         model=model_name,
-        model_provider="openai",
         temperature=0,
     )
 
@@ -215,4 +216,3 @@ def build_agentic_rag_graph(
     workflow.add_edge("rewrite_question", "generate_query_or_respond")
 
     return workflow.compile()
-
