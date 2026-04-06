@@ -2,7 +2,7 @@
 
 Multi-provider agentic RAG built with LangGraph and LangChain.
 
-This project indexes a set of source documents, caches the vector index locally, and answers questions with a retrieval-first workflow that can rewrite queries, call retrieval as a tool, and generate grounded answers with citations.
+This project indexes a set of source documents, persists a local Qdrant vector index on disk, and answers questions with a retrieval-first workflow that can rewrite queries, call retrieval as a tool, and generate grounded answers with citations. Rewrite loops are bounded by `MAX_REWRITES`, and exhausted retrieval paths terminate gracefully with an `insufficient_context` result instead of looping indefinitely.
 
 ## Features
 
@@ -10,7 +10,7 @@ This project indexes a set of source documents, caches the vector index locally,
 - Multi-provider chat model support
 - Multi-provider embedding support
 - OpenAI-compatible endpoint support
-- Local vector index cache in `.cache/vectorstores`
+- Persistent local Qdrant index in `.cache/vectorstores`
 - CLI with step-by-step execution tracing
 - Source-aware answers with citations
 
@@ -36,10 +36,12 @@ This project indexes a set of source documents, caches the vector index locally,
 ```bash
 git clone git@github.com:scldrn/RAGmain.git
 cd RAGmain
-python3 -m venv .venv
+/opt/homebrew/bin/python3.11 -m venv .venv
 source .venv/bin/activate
 pip install -e '.[dev]'
 ```
+
+Python `3.10+` is required. Python `3.11` is the preferred local baseline.
 
 Create a `.env` file with your provider config. Minimal Google AI Studio example:
 
@@ -49,6 +51,8 @@ CHAT_MODEL=gemini-2.5-flash
 EMBEDDING_PROVIDER=google
 EMBEDDING_MODEL=gemini-embedding-2-preview
 INDEX_CACHE_DIR=.cache/vectorstores
+INGESTION_MODE=auto
+FETCH_TIMEOUT_SECONDS=20
 GOOGLE_API_KEY=your_api_key
 ```
 
@@ -58,12 +62,32 @@ Run a query:
 python -m agentic_rag --question "What does Lilian Weng say about reward hacking?"
 ```
 
+Run the explicit query command:
+
+```bash
+python -m agentic_rag query --question "What does Lilian Weng say about reward hacking?"
+```
+
+Pre-build the index explicitly:
+
+```bash
+python -m agentic_rag ingest
+```
+
 Run with trace output:
 
 ```bash
 python -m agentic_rag \
   --question "What does Lilian Weng say about reward hacking?" \
   --show-steps
+```
+
+Run with startup diagnostics and verbose logs:
+
+```bash
+python -m agentic_rag \
+  --verbose \
+  --question "What does Lilian Weng say about reward hacking?"
 ```
 
 ## Provider Examples
@@ -106,6 +130,8 @@ EMBEDDING_API_KEY=lm-studio
 
 Common options:
 
+- `query`
+- `ingest`
 - `--question`
 - `--url`
 - `--chat-provider`
@@ -116,6 +142,7 @@ Common options:
 - `--embedding-api-base`
 - `--show-steps`
 - `--diagram`
+- `--verbose`
 
 Show full help:
 
@@ -131,7 +158,7 @@ python -m agentic_rag --help
 4. Retrieve relevant chunks as a tool call.
 5. Grade retrieved context.
 6. Rewrite the question if retrieval quality is weak.
-7. Generate a final cited answer.
+7. Stop at `insufficient_context` if rewrites are exhausted, otherwise generate a final cited answer.
 
 ## Default Sources
 
@@ -148,14 +175,25 @@ python -m agentic_rag \
 
 ## Development
 
-Run tests:
+Run the local quality gates:
 
 ```bash
-pytest
+make check
+```
+
+Equivalent individual commands:
+
+```bash
+ruff check .
+ruff format --check .
+mypy src/agentic_rag
+pytest --cov=src/agentic_rag --cov-report=term-missing --cov-fail-under=85
 ```
 
 Main files:
 
+- `src/agentic_rag/service.py`
+- `src/agentic_rag/errors.py`
 - `src/agentic_rag/providers.py`
 - `src/agentic_rag/app.py`
 - `src/agentic_rag/graph.py`
@@ -164,6 +202,14 @@ Main files:
 
 ## Notes
 
-- The first run for a new source/config combination builds embeddings and writes a cache file.
+- `python -m agentic_rag --question "..."` remains supported as a legacy shortcut for `python -m agentic_rag query --question "..."`.
+- `INGESTION_MODE=auto` builds a missing index on first query. `INGESTION_MODE=explicit` requires calling `AgenticRagService.ingest()` before querying.
+- `MAX_REWRITES` bounds rewrite loops. When retrieval remains weak after that limit, the service returns a structured `insufficient_context` termination reason and a graceful fallback answer.
+- Corrupted or incomplete Qdrant cache directories are detected and rebuilt automatically.
+- Document fetches use per-request timeouts, retry each URL, and continue indexing with the remaining sources when only some URLs fail.
+- `--verbose` enables startup diagnostics and runtime logging for command, providers, cache path, index state, and final query outcome.
+- The first run for a new source/config combination builds embeddings and writes a local Qdrant index.
 - Later runs reuse the cached vector index and are much cheaper/faster.
-- Python `3.10+` is recommended even though the project currently runs on `3.9`.
+- Install Git hooks with `pre-commit install` after setting up the virtualenv.
+- `make check` is the canonical local CI gate and matches the GitHub Actions workflow.
+- The shared runtime entry point is `AgenticRagService`, which powers both indexing and queries.

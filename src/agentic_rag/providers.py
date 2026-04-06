@@ -2,10 +2,12 @@ from __future__ import annotations
 
 import os
 from dataclasses import dataclass
-from typing import Optional, Tuple
+from typing import Any, Optional, Tuple
 
 from langchain_core.embeddings import Embeddings
+from langchain_core.language_models import BaseChatModel
 
+from agentic_rag.errors import ConfigurationError
 from agentic_rag.settings import (
     DEFAULT_CHAT_MODELS,
     DEFAULT_EMBEDDING_MODELS,
@@ -47,7 +49,7 @@ class LiteLLMEmbeddingsAdapter(Embeddings):
         self.api_key = api_key
         self.api_base = api_base
 
-    def embed_documents(self, texts):
+    def embed_documents(self, texts: list[str]) -> list[list[float]]:
         import litellm
 
         response = litellm.embedding(
@@ -58,14 +60,13 @@ class LiteLLMEmbeddingsAdapter(Embeddings):
         )
         return [self._embedding_from_item(item) for item in response.data]
 
-    def embed_query(self, text):
+    def embed_query(self, text: str) -> list[float]:
         return self.embed_documents([text])[0]
 
     @staticmethod
-    def _embedding_from_item(item):
-        if isinstance(item, dict):
-            return item["embedding"]
-        return item.embedding
+    def _embedding_from_item(item: Any) -> list[float]:
+        embedding = item["embedding"] if isinstance(item, dict) else item.embedding
+        return list(embedding)
 
 
 def _supported_providers_text(values: Tuple[str, ...]) -> str:
@@ -74,15 +75,13 @@ def _supported_providers_text(values: Tuple[str, ...]) -> str:
 
 def _normalize_supported_provider(provider: Optional[str], *, kind: str) -> Optional[str]:
     normalized = normalize_provider_name(provider)
-    supported = (
-        SUPPORTED_CHAT_PROVIDERS if kind == "chat" else SUPPORTED_EMBEDDING_PROVIDERS
-    )
+    supported = SUPPORTED_CHAT_PROVIDERS if kind == "chat" else SUPPORTED_EMBEDDING_PROVIDERS
 
     if normalized is None:
         return None
 
     if normalized not in supported:
-        raise RuntimeError(
+        raise ConfigurationError(
             f"Unsupported {kind} provider '{provider}'. Supported values: "
             f"{_supported_providers_text(supported)}."
         )
@@ -123,7 +122,10 @@ def _credential_hint(provider: str) -> str:
 def resolve_chat_config(settings: AgenticRagSettings) -> ResolvedProviderConfig:
     """Resolve chat provider settings into an executable model config."""
     provider = _normalize_supported_provider(settings.chat_provider, kind="chat")
-    assert provider is not None
+    if provider is None:
+        raise ConfigurationError(
+            f"Could not resolve chat provider from '{settings.chat_provider}'."
+        )
 
     api_key = _resolve_api_key(
         provider,
@@ -132,12 +134,12 @@ def resolve_chat_config(settings: AgenticRagSettings) -> ResolvedProviderConfig:
     )
 
     if provider == "openai-compatible" and not settings.chat_api_base:
-        raise RuntimeError(
+        raise ConfigurationError(
             "The 'openai-compatible' chat provider requires CHAT_API_BASE or --chat-api-base."
         )
 
     if provider != "litellm" and not api_key:
-        raise RuntimeError(
+        raise ConfigurationError(
             f"Missing credentials for chat provider '{provider}'. "
             f"Set {settings.chat_api_key_env or _credential_hint(provider)}."
         )
@@ -162,7 +164,7 @@ def resolve_embedding_config(
     )
 
     if provider is None:
-        raise RuntimeError(
+        raise ConfigurationError(
             f"Chat provider '{chat_config.provider}' does not define embeddings automatically. "
             "Set EMBEDDING_PROVIDER and EMBEDDING_MODEL explicitly."
         )
@@ -179,13 +181,13 @@ def resolve_embedding_config(
         api_base = api_base or chat_config.api_base
 
     if provider == "openai-compatible" and not api_base:
-        raise RuntimeError(
+        raise ConfigurationError(
             "The 'openai-compatible' embedding provider requires "
             "EMBEDDING_API_BASE or --embedding-api-base."
         )
 
     if provider != "litellm" and not api_key:
-        raise RuntimeError(
+        raise ConfigurationError(
             f"Missing credentials for embedding provider '{provider}'. "
             f"Set {settings.embedding_api_key_env or _credential_hint(provider)}."
         )
@@ -198,80 +200,80 @@ def resolve_embedding_config(
     )
 
 
-def create_chat_model(config: ResolvedProviderConfig):
+def create_chat_model(config: ResolvedProviderConfig) -> BaseChatModel:
     """Create a chat model for the configured provider."""
     if config.provider == "google":
         from langchain_google_genai import ChatGoogleGenerativeAI
 
-        kwargs = {
+        google_kwargs: dict[str, Any] = {
             "model": config.model,
             "temperature": config.temperature or 0,
         }
         if config.api_key:
-            kwargs["api_key"] = config.api_key
-        return ChatGoogleGenerativeAI(**kwargs)
+            google_kwargs["api_key"] = config.api_key
+        return ChatGoogleGenerativeAI(**google_kwargs)
 
     if config.provider in {"openai", "openai-compatible"}:
         from langchain_openai import ChatOpenAI
 
-        kwargs = {
+        openai_kwargs: dict[str, Any] = {
             "model": config.model,
             "temperature": config.temperature or 0,
         }
         if config.api_key:
-            kwargs["api_key"] = config.api_key
+            openai_kwargs["api_key"] = config.api_key
         if config.api_base:
-            kwargs["base_url"] = config.api_base
-        return ChatOpenAI(**kwargs)
+            openai_kwargs["base_url"] = config.api_base
+        return ChatOpenAI(**openai_kwargs)
 
     if config.provider == "anthropic":
         from langchain_anthropic import ChatAnthropic
 
-        kwargs = {
+        anthropic_kwargs: dict[str, Any] = {
             "model_name": config.model,
             "temperature": config.temperature or 0,
         }
         if config.api_key:
-            kwargs["api_key"] = config.api_key
+            anthropic_kwargs["api_key"] = config.api_key
         if config.api_base:
-            kwargs["base_url"] = config.api_base
-        return ChatAnthropic(**kwargs)
+            anthropic_kwargs["base_url"] = config.api_base
+        return ChatAnthropic(**anthropic_kwargs)
 
     if config.provider == "litellm":
         from langchain_litellm import ChatLiteLLM
 
-        kwargs = {
+        litellm_kwargs: dict[str, Any] = {
             "model": config.model,
             "temperature": config.temperature or 0,
         }
         if config.api_key:
-            kwargs["api_key"] = config.api_key
+            litellm_kwargs["api_key"] = config.api_key
         if config.api_base:
-            kwargs["api_base"] = config.api_base
-        return ChatLiteLLM(**kwargs)
+            litellm_kwargs["api_base"] = config.api_base
+        return ChatLiteLLM(**litellm_kwargs)
 
-    raise RuntimeError(f"Unsupported chat provider '{config.provider}'.")
+    raise ConfigurationError(f"Unsupported chat provider '{config.provider}'.")
 
 
-def create_embeddings(config: ResolvedProviderConfig):
+def create_embeddings(config: ResolvedProviderConfig) -> Embeddings:
     """Create embeddings for the configured provider."""
     if config.provider == "google":
         from langchain_google_genai import GoogleGenerativeAIEmbeddings
 
-        kwargs = {"model": config.model}
+        google_kwargs: dict[str, Any] = {"model": config.model}
         if config.api_key:
-            kwargs["google_api_key"] = config.api_key
-        return GoogleGenerativeAIEmbeddings(**kwargs)
+            google_kwargs["google_api_key"] = config.api_key
+        return GoogleGenerativeAIEmbeddings(**google_kwargs)
 
     if config.provider in {"openai", "openai-compatible"}:
         from langchain_openai import OpenAIEmbeddings
 
-        kwargs = {"model": config.model}
+        openai_kwargs: dict[str, Any] = {"model": config.model}
         if config.api_key:
-            kwargs["api_key"] = config.api_key
+            openai_kwargs["api_key"] = config.api_key
         if config.api_base:
-            kwargs["base_url"] = config.api_base
-        return OpenAIEmbeddings(**kwargs)
+            openai_kwargs["base_url"] = config.api_base
+        return OpenAIEmbeddings(**openai_kwargs)
 
     if config.provider == "litellm":
         return LiteLLMEmbeddingsAdapter(
@@ -280,4 +282,4 @@ def create_embeddings(config: ResolvedProviderConfig):
             api_base=config.api_base,
         )
 
-    raise RuntimeError(f"Unsupported embedding provider '{config.provider}'.")
+    raise ConfigurationError(f"Unsupported embedding provider '{config.provider}'.")
