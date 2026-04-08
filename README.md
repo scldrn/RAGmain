@@ -1,8 +1,8 @@
 # Agentic RAG
 
-Multi-provider agentic RAG built with LangGraph and LangChain.
+Multi-provider agentic RAG built with LangGraph, LangChain, and local Qdrant.
 
-This project indexes a set of source documents, persists a local Qdrant vector index on disk, and answers questions with a retrieval-first workflow that can rewrite queries, call retrieval as a tool, and generate grounded answers with citations. Rewrite loops are bounded by `MAX_REWRITES`, and exhausted retrieval paths terminate gracefully with an `insufficient_context` result instead of looping indefinitely.
+This project indexes a set of source documents, persists a local Qdrant vector index on disk, and answers questions with a retrieval-first workflow that can rewrite queries, call retrieval as a tool, and generate grounded answers with citations. Rewrite loops are bounded by `MAX_REWRITES`, retrieval is reranked and cleaned before it reaches the model, and exhausted retrieval paths terminate gracefully with an `insufficient_context` result instead of looping indefinitely or guessing.
 
 ## Features
 
@@ -10,9 +10,13 @@ This project indexes a set of source documents, persists a local Qdrant vector i
 - Multi-provider chat model support
 - Multi-provider embedding support
 - OpenAI-compatible endpoint support
+- Dense and hybrid retrieval modes
+- Deterministic reranking, deduplication, and context trimming
 - Persistent local Qdrant index in `.cache/vectorstores`
 - CLI with step-by-step execution tracing
 - Source-aware answers with citations
+- Offline evaluation harness with checked-in baselines
+- Full local quality gate with 100% test coverage
 
 ## Supported Providers
 
@@ -160,6 +164,14 @@ python -m agentic_rag --help
 6. Normalize rewrites down to a concise retrieval query instead of feeding explanation-heavy text back into retrieval.
 7. Stop at `insufficient_context` if rewrites are exhausted or if a rewrite stalls without improving the query, otherwise generate a final cited answer.
 
+## Retrieval Quality
+
+- Retrieval expands the initial candidate pool and applies deterministic reranking before context reaches the answer model.
+- Boilerplate-heavy chunks, duplicate chunks, and low-value context are filtered out before final context assembly.
+- Weak retrieval does not silently fall through to answer generation: the graph rewrites the query or terminates with `insufficient_context`.
+- Offline evals under `tests/eval/` let you compare retrieval behavior without calling external model APIs.
+- Integration tests exercise grounded-answer, rewrite-recovery, and insufficient-context paths end to end.
+
 ## Default Sources
 
 The current default setup indexes a small set of Lilian Weng blog posts so the project works immediately as a reference RAG example.
@@ -213,6 +225,9 @@ The Phase 2 starter corpus and checked-in dense/hybrid baselines live under `tes
 Main files:
 
 - `src/agentic_rag/service.py`
+- `src/agentic_rag/retrieval.py`
+- `src/agentic_rag/evaluation.py`
+- `src/agentic_rag/presentation.py`
 - `src/agentic_rag/errors.py`
 - `src/agentic_rag/providers.py`
 - `src/agentic_rag/app.py`
