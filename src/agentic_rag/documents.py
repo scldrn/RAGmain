@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import logging
 import os
+import re
 import time
 from collections.abc import Iterable, Sequence
 
@@ -15,6 +16,64 @@ from agentic_rag.errors import DocumentLoadError
 
 DEFAULT_FETCH_MAX_ATTEMPTS = 3
 DEFAULT_FETCH_RETRY_BACKOFF_SECONDS = 0.5
+DOCUMENT_CLEANER_FINGERPRINT = "web-clean-v6"
+EXACT_NOISE_LINES = {
+    "",
+    "|",
+    "«",
+    "»",
+    "citation",
+    "references",
+    "lil'log",
+    "table of contents",
+}
+NAVIGATION_WORDS = {
+    "archive",
+    "author",
+    "date",
+    "estimated",
+    "faq",
+    "factuality",
+    "hallucination",
+    "language-model",
+    "language",
+    "long-read",
+    "lil",
+    "log",
+    "nlp",
+    "papermod",
+    "posts",
+    "powered",
+    "read",
+    "reinforcement-learning",
+    "rlhf",
+    "safety",
+    "search",
+    "tags",
+    "time",
+}
+TITLE_CASE_CONNECTORS = {
+    "a",
+    "an",
+    "and",
+    "as",
+    "at",
+    "by",
+    "does",
+    "for",
+    "from",
+    "in",
+    "into",
+    "of",
+    "on",
+    "or",
+    "the",
+    "to",
+    "vs",
+    "via",
+    "with",
+    "without",
+}
 logger = logging.getLogger(__name__)
 
 
@@ -65,6 +124,138 @@ def _load_documents_with_retries(
     ) from last_error
 
 
+def _normalize_line(text: str) -> str:
+    normalized = re.sub(r"\s+", " ", text.replace("\xa0", " ")).strip()
+    return re.sub(r"\s*#\s*$", "", normalized).strip()
+
+
+def _line_words(line: str) -> list[str]:
+    return re.findall(r"[a-z0-9-]+", line.lower())
+
+
+def _is_noise_line(line: str) -> bool:
+    normalized = _normalize_line(line)
+    lowered = normalized.lower()
+    if lowered in EXACT_NOISE_LINES:
+        return True
+    if lowered.startswith("powered by") or lowered.startswith("© "):
+        return True
+    if lowered.startswith("date:") or "estimated reading time" in lowered:
+        return True
+
+    words = _line_words(normalized)
+    if not words:
+        return True
+
+    if len(words) <= 12 and set(words) <= NAVIGATION_WORDS:
+        return True
+
+    return False
+
+
+def _is_reference_boundary(line: str, *, current_text: str) -> bool:
+    lowered = _normalize_line(line).lower()
+    if not current_text:
+        return False
+    current_text_length = len(current_text)
+    sentence_like_count = len(re.findall(r"[.!?]", current_text))
+    if current_text_length < 800 and sentence_like_count < 2:
+        return False
+    return lowered in {"citation", "citation#", "references", "references#"} or lowered.startswith(
+        "or @article"
+    )
+
+
+def clean_document_content(text: str) -> str:
+    """Remove obvious navigation, tags, and trailing references from loaded page text."""
+    lines = [_normalize_line(line) for line in text.splitlines()]
+    cleaned_lines: list[str] = []
+    previous_line: str | None = None
+
+    for line in lines:
+        current_text = "\n".join(cleaned_lines)
+        if _is_reference_boundary(line, current_text=current_text):
+            break
+        if _is_noise_line(line):
+            continue
+        if line == previous_line:
+            continue
+        cleaned_lines.append(line)
+        previous_line = line
+
+    cleaned_lines = _strip_leading_outline(cleaned_lines)
+
+    if cleaned_lines:
+        return "\n".join(cleaned_lines).strip()
+
+    return _normalize_line(text)
+
+
+def _strip_leading_outline(lines: list[str]) -> list[str]:
+    """Drop heading-heavy intro blocks until the first sentence-like line."""
+    if not lines:
+        return lines
+
+    for index, line in enumerate(lines):
+        if _looks_like_sentence_line(line):
+            if index >= 1:
+                return lines[index:]
+            return lines
+
+    return lines
+
+
+def _looks_like_sentence_line(line: str) -> bool:
+    lowered = line.lower()
+    word_count = len(_line_words(line))
+    if _looks_like_outline_heading(line):
+        return False
+    if "." in line or "!" in line:
+        return True
+    if ("?" in line or ":" in line) and word_count >= 8:
+        return True
+    if word_count >= 12:
+        return True
+    if "reward hacking occurs" in lowered:
+        return True
+    return False
+
+
+def _looks_like_outline_heading(line: str) -> bool:
+    stripped = line.strip()
+    if "?" not in stripped and ":" not in stripped:
+        return False
+
+    heading_candidate = stripped.split(":", 1)[0].rstrip("?").strip()
+    words = re.findall(r"[A-Za-z][A-Za-z'-]*", heading_candidate)
+    if len(words) < 3:
+        return False
+
+    return all(_is_title_case_heading_word(word) for word in words)
+
+
+def _is_title_case_heading_word(word: str) -> bool:
+    lowered = word.lower()
+    if lowered in TITLE_CASE_CONNECTORS:
+        return True
+    if len(word) >= 2 and word[:2].isupper():
+        return True
+    return word[0].isupper() and word[1:].islower()
+
+
+def clean_documents(documents: Sequence[Document]) -> list[Document]:
+    """Normalize loaded documents while preserving metadata."""
+    cleaned_documents: list[Document] = []
+    for document in documents:
+        cleaned_documents.append(
+            Document(
+                page_content=clean_document_content(document.page_content),
+                metadata=dict(document.metadata),
+            )
+        )
+    return cleaned_documents
+
+
 def load_documents(
     urls: Sequence[str],
     *,
@@ -96,7 +287,7 @@ def load_documents(
                 len(urls),
                 ", ".join(failed_urls),
             )
-        return loaded_documents
+        return clean_documents(loaded_documents)
 
     joined_failed_urls = ", ".join(failed_urls) or "the configured sources"
     raise DocumentLoadError(f"Failed to load any source documents from: {joined_failed_urls}.")

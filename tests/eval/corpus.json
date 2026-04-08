@@ -1,0 +1,92 @@
+{
+  "name": "phase-2-starter-corpus",
+  "version": "1.0",
+  "documents": [
+    {
+      "id": "reward_hacking_overview",
+      "title": "Reward Hacking Overview",
+      "source": "eval://reward-hacking",
+      "content": "Reward hacking happens when an optimizer exploits the reward signal instead of completing the intended task. The system can look successful according to the metric while missing the real goal."
+    },
+    {
+      "id": "hallucination_notes",
+      "title": "Hallucination Notes",
+      "source": "eval://hallucination",
+      "content": "Hallucination is the production of unsupported claims. Retrieval can reduce hallucination by grounding generation in external evidence."
+    },
+    {
+      "id": "video_diffusion_primer",
+      "title": "Video Diffusion Primer",
+      "source": "eval://video-diffusion",
+      "content": "Diffusion video models generate clips by denoising noisy latent states across time. Temporal consistency is a central challenge for coherent motion."
+    },
+    {
+      "id": "citation_guidelines",
+      "title": "Citation Guidelines",
+      "source": "eval://citations",
+      "content": "Citations let users verify which source supports each statement. Grounded answers should attach citations to the claims they rely on."
+    },
+    {
+      "id": "metrics_decoy",
+      "title": "Metrics Dashboard Decoy",
+      "source": "eval://metrics-decoy",
+      "content": "A dashboard can be gamed when teams optimize a score instead of the long-term outcome. The note mentions goals, metrics, and dashboards but does not discuss reward signals."
+    },
+    {
+      "id": "editing_decoy",
+      "title": "Editing Decoy",
+      "source": "eval://editing-decoy",
+      "content": "Video editors cut clips over time and worry about visual continuity between frames. The article is about post-production workflows, not diffusion models."
+    }
+  ],
+  "cases": [
+    {
+      "id": "answer_hallucination_definition",
+      "category": "answerable",
+      "question": "What is hallucination?",
+      "gold_document_ids": ["hallucination_notes"],
+      "expected_answer_substrings": ["unsupported claims"],
+      "expect_insufficient_context": false
+    },
+    {
+      "id": "answer_citation_benefit",
+      "category": "answerable",
+      "question": "Why do citations help users?",
+      "gold_document_ids": ["citation_guidelines"],
+      "expected_answer_substrings": ["verify which source supports each statement"],
+      "expect_insufficient_context": false
+    },
+    {
+      "id": "adversarial_reward_hacking_paraphrase",
+      "category": "adversarial",
+      "question": "Which failure mode is wireheading instead of task completion?",
+      "gold_document_ids": ["reward_hacking_overview"],
+      "expected_answer_substrings": ["reward signal"],
+      "expect_insufficient_context": false
+    },
+    {
+      "id": "citation_temporal_consistency",
+      "category": "citation",
+      "question": "Which source says temporal consistency is a central challenge?",
+      "gold_document_ids": ["video_diffusion_primer"],
+      "expected_answer_substrings": ["Temporal consistency is a central challenge"],
+      "expect_insufficient_context": false
+    },
+    {
+      "id": "citation_grounded_answers",
+      "category": "citation",
+      "question": "What should grounded answers attach to the claims they rely on?",
+      "gold_document_ids": ["citation_guidelines"],
+      "expected_answer_substrings": ["attach citations"],
+      "expect_insufficient_context": false
+    },
+    {
+      "id": "unanswerable_training_budget",
+      "category": "unanswerable",
+      "question": "What training budget was used for the experiments?",
+      "gold_document_ids": [],
+      "expected_answer_substrings": [],
+      "expect_insufficient_context": true
+    }
+  ]
+}

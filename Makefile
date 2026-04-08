@@ -1,4 +1,4 @@
-.PHONY: install-dev lint format-check typecheck test check
+.PHONY: install-dev lint format-check typecheck test eval-baseline eval-hybrid eval-compare check
 
 VENV ?= .venv
 PYTHON ?= $(VENV)/bin/python
@@ -21,5 +21,14 @@ typecheck:
 
 test:
 	$(PYTEST) --cov=src/agentic_rag --cov-report=term-missing --cov-fail-under=85
+
+eval-baseline:
+	$(PYTHON) -m agentic_rag.evaluation --check-baseline
+
+eval-hybrid:
+	$(PYTHON) -m agentic_rag.evaluation --retrieval-mode hybrid --check-baseline
+
+eval-compare:
+	$(PYTHON) -m agentic_rag.evaluation --retrieval-mode hybrid --compare-to tests/eval/baseline_dense.json
 
 check: lint format-check typecheck test

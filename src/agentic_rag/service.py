@@ -4,16 +4,17 @@ import hashlib
 import json
 import logging
 import shutil
+import time
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Callable
+from typing import Any, Callable, TypeVar, cast
 
 from langchain_core.embeddings import Embeddings
-from langchain_core.messages import BaseMessage
-from langchain_qdrant import QdrantVectorStore, RetrievalMode
+from langchain_core.messages import AIMessage, BaseMessage
+from langchain_qdrant import QdrantVectorStore, RetrievalMode, SparseEmbeddings
 from qdrant_client import QdrantClient
 
-from agentic_rag.documents import preprocess_documents
+from agentic_rag.documents import DOCUMENT_CLEANER_FINGERPRINT, preprocess_documents
 from agentic_rag.errors import ConfigurationError, DocumentLoadError, LLMError, VectorStoreError
 from agentic_rag.graph import (
     build_agentic_rag_graph,
@@ -21,10 +22,17 @@ from agentic_rag.graph import (
     message_text,
 )
 from agentic_rag.providers import (
+    ResolvedProviderConfig,
     create_chat_model,
     create_embeddings,
     resolve_chat_config,
     resolve_embedding_config,
+)
+from agentic_rag.retrieval import (
+    SPARSE_ENCODER_FINGERPRINT,
+    RerankingRetriever,
+    TokenSparseEmbeddings,
+    retrieval_fetch_k,
 )
 from agentic_rag.settings import AgenticRagSettings
 
@@ -77,8 +85,10 @@ class QueryResult:
 
 StepHandler = Callable[[QueryStep], None]
 QDRANT_COLLECTION_NAME = "documents"
-QDRANT_RETRIEVAL_MODE = RetrievalMode.DENSE
+DEFAULT_MODEL_MAX_ATTEMPTS = 3
+DEFAULT_MODEL_RETRY_BACKOFF_SECONDS = 0.5
 logger = logging.getLogger(__name__)
+T = TypeVar("T")
 
 
 def _effective_embedding_api_base(settings: AgenticRagSettings) -> str | None:
@@ -89,15 +99,188 @@ def _effective_embedding_api_base(settings: AgenticRagSettings) -> str | None:
     return None
 
 
+def _llm_error_message(exc: Exception, *, default: str) -> str:
+    try:
+        import httpx
+    except Exception:  # pragma: no cover - httpx is installed in normal runtime/tests
+        httpx = None  # type: ignore[assignment]
+
+    if httpx is not None and isinstance(exc, httpx.HTTPStatusError):
+        status_code = exc.response.status_code
+        if status_code == 401:
+            return (
+                "Model request failed with 401 Unauthorized. "
+                "Check the provider API key and API base."
+            )
+        if status_code == 429:
+            return (
+                "Model request failed with 429 Too Many Requests. "
+                "Check quota or rate limits and retry."
+            )
+
+    if httpx is not None and isinstance(exc, httpx.TimeoutException):
+        return (
+            "Model request timed out after the configured timeout. "
+            "Retry the request or increase MODEL_TIMEOUT_SECONDS."
+        )
+
+    if httpx is not None and isinstance(exc, httpx.RemoteProtocolError):
+        return "Model request failed due to a transient network/protocol error. Retry the request."
+
+    return default
+
+
+def _model_retry_delay_seconds(attempt: int) -> float:
+    return DEFAULT_MODEL_RETRY_BACKOFF_SECONDS * (2 ** (attempt - 1))
+
+
+def _http_status_code(exc: Exception) -> int | None:
+    response = getattr(exc, "response", None)
+    status_code = getattr(response, "status_code", None)
+    if isinstance(status_code, int):
+        return status_code
+
+    direct_status_code = getattr(exc, "status_code", None)
+    if isinstance(direct_status_code, int):
+        return direct_status_code
+
+    return None
+
+
+def _should_retry_model_error(exc: Exception) -> bool:
+    status_code = _http_status_code(exc)
+    if status_code in {408, 409, 425, 429}:
+        return True
+    if status_code is not None and 500 <= status_code < 600:
+        return True
+
+    try:
+        import httpx
+    except Exception:  # pragma: no cover - httpx is installed in normal runtime/tests
+        httpx = None  # type: ignore[assignment]
+
+    if httpx is not None and isinstance(exc, (httpx.TimeoutException, httpx.TransportError)):
+        return True
+
+    return isinstance(exc, (TimeoutError, ConnectionError))
+
+
+def _invoke_with_retries(
+    *,
+    operation_name: str,
+    max_attempts: int,
+    call: Callable[[], T],
+    root_cause_lost_message: str,
+) -> T:
+    if max_attempts <= 0:
+        raise LLMError(root_cause_lost_message)
+
+    last_error: Exception | None = None
+
+    for attempt in range(1, max_attempts + 1):
+        try:
+            return call()
+        except Exception as exc:
+            last_error = exc
+            if attempt == max_attempts or not _should_retry_model_error(exc):
+                break
+
+            delay_seconds = _model_retry_delay_seconds(attempt)
+            logger.warning(
+                "%s failed on attempt %s/%s; retrying after %.2fs.",
+                operation_name,
+                attempt,
+                max_attempts,
+                delay_seconds,
+                exc_info=exc,
+            )
+            time.sleep(delay_seconds)
+
+    if last_error is None:  # pragma: no cover - loop always sets or returns
+        raise LLMError(root_cause_lost_message)
+    raise last_error
+
+
+@dataclass(frozen=True)
+class RetryingChatModel:
+    """Wrap a chat model with deterministic retry/backoff behavior."""
+
+    model: Any
+    max_attempts: int = DEFAULT_MODEL_MAX_ATTEMPTS
+
+    def invoke(self, messages: Any) -> Any:
+        return _invoke_with_retries(
+            operation_name="Model call",
+            max_attempts=self.max_attempts,
+            call=lambda: self.model.invoke(messages),
+            root_cause_lost_message="Model call failed without preserving the root cause.",
+        )
+
+
+@dataclass(frozen=True)
+class RetryingEmbeddings(Embeddings):
+    """Wrap embeddings with deterministic retry/backoff behavior."""
+
+    embeddings: Embeddings
+    max_attempts: int = DEFAULT_MODEL_MAX_ATTEMPTS
+
+    def embed_documents(self, texts: list[str]) -> list[list[float]]:
+        return _invoke_with_retries(
+            operation_name="Embeddings call",
+            max_attempts=self.max_attempts,
+            call=lambda: self.embeddings.embed_documents(texts),
+            root_cause_lost_message="Embeddings call failed without preserving the root cause.",
+        )
+
+    def embed_query(self, text: str) -> list[float]:
+        return self.embed_documents([text])[0]
+
+
+class _DiagramChatModel:
+    """Minimal model stub used only to compile the static graph diagram."""
+
+    def invoke(self, _messages: Any) -> AIMessage:
+        return AIMessage(content="")
+
+
+class _DiagramRetriever:
+    """Minimal retriever stub used only to compile the static graph diagram."""
+
+    def invoke(self, _query: str) -> list[Any]:
+        return []
+
+
+def _qdrant_retrieval_mode(settings: AgenticRagSettings) -> RetrievalMode:
+    if settings.retrieval_mode == "dense":
+        return RetrievalMode.DENSE
+    if settings.retrieval_mode == "hybrid":
+        return RetrievalMode.HYBRID
+    raise ConfigurationError(f"Unsupported retrieval_mode '{settings.retrieval_mode}'.")
+
+
+def _qdrant_sparse_embeddings(settings: AgenticRagSettings) -> SparseEmbeddings | None:
+    retrieval_mode = _qdrant_retrieval_mode(settings)
+    if retrieval_mode is RetrievalMode.HYBRID:
+        return TokenSparseEmbeddings()
+    return None
+
+
 def index_fingerprint(settings: AgenticRagSettings) -> str:
     """Compute a stable fingerprint for the current source/index configuration."""
+    retrieval_mode = _qdrant_retrieval_mode(settings)
+    sparse_fingerprint = (
+        SPARSE_ENCODER_FINGERPRINT if retrieval_mode is RetrievalMode.HYBRID else None
+    )
     payload = {
         "source_urls": list(settings.source_urls),
         "chunk_size": settings.chunk_size,
         "chunk_overlap": settings.chunk_overlap,
+        "retrieval_mode": retrieval_mode.value,
+        "document_cleaner": DOCUMENT_CLEANER_FINGERPRINT,
         "embedding_provider": settings.embedding_provider,
         "embedding_model": settings.embedding_model,
         "embedding_api_base": _effective_embedding_api_base(settings),
+        "sparse_encoder": sparse_fingerprint,
     }
     return hashlib.sha256(json.dumps(payload, sort_keys=True).encode("utf-8")).hexdigest()
 
@@ -135,6 +318,8 @@ def _load_existing_vectorstore(
     cache_path: Path,
     *,
     embeddings: Embeddings,
+    retrieval_mode: RetrievalMode,
+    sparse_embeddings: SparseEmbeddings | None,
 ) -> QdrantVectorStore | None:
     if not cache_path.exists():
         return None
@@ -149,7 +334,8 @@ def _load_existing_vectorstore(
             client=client,
             collection_name=QDRANT_COLLECTION_NAME,
             embedding=embeddings,
-            retrieval_mode=QDRANT_RETRIEVAL_MODE,
+            retrieval_mode=retrieval_mode,
+            sparse_embedding=sparse_embeddings,
         )
     except Exception:
         _close_qdrant_client(client)
@@ -161,6 +347,8 @@ def _build_vectorstore(
     *,
     cache_path: Path,
     embeddings: Embeddings,
+    retrieval_mode: RetrievalMode,
+    sparse_embeddings: SparseEmbeddings | None,
 ) -> tuple[QdrantVectorStore, int]:
     try:
         documents = preprocess_documents(
@@ -183,7 +371,8 @@ def _build_vectorstore(
             embedding=embeddings,
             path=str(cache_path),
             collection_name=QDRANT_COLLECTION_NAME,
-            retrieval_mode=QDRANT_RETRIEVAL_MODE,
+            retrieval_mode=retrieval_mode,
+            sparse_embedding=sparse_embeddings,
         )
     except Exception as exc:
         raise VectorStoreError(
@@ -198,6 +387,8 @@ def _rebuild_corrupted_vectorstore(
     *,
     cache_path: Path,
     embeddings: Embeddings,
+    retrieval_mode: RetrievalMode,
+    sparse_embeddings: SparseEmbeddings | None,
     reason: Exception | None = None,
 ) -> tuple[QdrantVectorStore, int]:
     if reason is None:
@@ -216,7 +407,13 @@ def _rebuild_corrupted_vectorstore(
             f"Failed to remove the invalid Qdrant index at '{cache_path}'."
         ) from exc
 
-    return _build_vectorstore(settings, cache_path=cache_path, embeddings=embeddings)
+    return _build_vectorstore(
+        settings,
+        cache_path=cache_path,
+        embeddings=embeddings,
+        retrieval_mode=retrieval_mode,
+        sparse_embeddings=sparse_embeddings,
+    )
 
 
 def load_or_create_vectorstore(
@@ -228,14 +425,23 @@ def load_or_create_vectorstore(
     """Load a persisted Qdrant index when possible, otherwise build it locally on disk."""
     cache_path = index_cache_path(settings)
     cache_exists = cache_path.exists()
+    retrieval_mode = _qdrant_retrieval_mode(settings)
+    sparse_embeddings = _qdrant_sparse_embeddings(settings)
 
     try:
-        vectorstore = _load_existing_vectorstore(cache_path, embeddings=embeddings)
+        vectorstore = _load_existing_vectorstore(
+            cache_path,
+            embeddings=embeddings,
+            retrieval_mode=retrieval_mode,
+            sparse_embeddings=sparse_embeddings,
+        )
     except Exception as exc:
         return _rebuild_corrupted_vectorstore(
             settings,
             cache_path=cache_path,
             embeddings=embeddings,
+            retrieval_mode=retrieval_mode,
+            sparse_embeddings=sparse_embeddings,
             reason=exc,
         )
     if vectorstore is not None:
@@ -246,6 +452,8 @@ def load_or_create_vectorstore(
             settings,
             cache_path=cache_path,
             embeddings=embeddings,
+            retrieval_mode=retrieval_mode,
+            sparse_embeddings=sparse_embeddings,
         )
 
     if not create_if_missing:
@@ -254,7 +462,13 @@ def load_or_create_vectorstore(
             "Run ingest() first or set ingestion_mode='auto'."
         )
 
-    return _build_vectorstore(settings, cache_path=cache_path, embeddings=embeddings)
+    return _build_vectorstore(
+        settings,
+        cache_path=cache_path,
+        embeddings=embeddings,
+        retrieval_mode=retrieval_mode,
+        sparse_embeddings=sparse_embeddings,
+    )
 
 
 @dataclass(frozen=True)
@@ -268,6 +482,8 @@ class AgenticRagService:
         try:
             chat_cfg = resolve_chat_config(self.settings)
             resolve_embedding_config(self.settings, chat_cfg)
+            _qdrant_retrieval_mode(self.settings)
+            _qdrant_sparse_embeddings(self.settings)
         except ConfigurationError as exc:
             return HealthStatus(
                 ok=False,
@@ -296,25 +512,21 @@ class AgenticRagService:
         """Return the current persisted index status for this settings profile."""
         cache_path = index_cache_path(self.settings)
         if not cache_path.exists():
-            return IndexStatus(
-                cache_path=cache_path,
-                fingerprint=index_fingerprint(self.settings),
-                exists=False,
-            )
+            return self._known_index_status(exists=False)
 
-        client = QdrantClient(path=str(cache_path))
+        client: QdrantClient | None = None
         try:
+            client = QdrantClient(path=str(cache_path))
             exists = client.collection_exists(QDRANT_COLLECTION_NAME)
             document_count = _collection_document_count(client) if exists else None
+        except Exception as exc:
+            raise VectorStoreError(
+                f"Failed to inspect the persisted Qdrant index at '{cache_path}'."
+            ) from exc
         finally:
             _close_qdrant_client(client)
 
-        return IndexStatus(
-            cache_path=cache_path,
-            fingerprint=index_fingerprint(self.settings),
-            exists=exists,
-            document_count=document_count,
-        )
+        return self._known_index_status(exists=exists, document_count=document_count)
 
     def ingest(self) -> IndexStatus:
         """Build or reuse the persisted index for the current settings."""
@@ -330,7 +542,7 @@ class AgenticRagService:
         )
         try:
             logger.info("ingest_ready document_count=%s", document_count)
-            return self._index_status(document_count=document_count)
+            return self._known_index_status(exists=True, document_count=document_count)
         finally:
             _close_qdrant_client(vectorstore.client)
 
@@ -377,7 +589,9 @@ class AgenticRagService:
                     final_message = message
                     final_node_name = node_name
         except Exception as exc:
-            raise LLMError("Failed while running the query graph.") from exc
+            raise LLMError(
+                _llm_error_message(exc, default="Failed while running the query graph.")
+            ) from exc
         finally:
             _close_qdrant_client(vectorstore.client)
 
@@ -398,7 +612,7 @@ class AgenticRagService:
             final_message=final_message,
             answer_text=message_text(final_message).strip(),
             document_count=document_count,
-            index_status=self._index_status(document_count=document_count),
+            index_status=self._known_index_status(exists=True, document_count=document_count),
             steps=tuple(steps),
             termination_reason=termination_reason,
             rewrites_used=rewrites_used,
@@ -406,13 +620,16 @@ class AgenticRagService:
 
     def render_graph_mermaid(self) -> str:
         """Render the current graph as Mermaid text."""
-        graph, _document_count, vectorstore = self._build_query_graph()
         try:
+            graph = build_agentic_rag_graph(
+                response_model=cast(Any, _DiagramChatModel()),
+                grader_model=cast(Any, _DiagramChatModel()),
+                retriever_tool=create_retriever_tool(_DiagramRetriever()),
+                max_rewrites=self.settings.max_rewrites,
+            )
             return graph.get_graph().draw_mermaid()
         except Exception as exc:
             raise LLMError("Failed to render the graph diagram.") from exc
-        finally:
-            _close_qdrant_client(vectorstore.client)
 
     def export_graph_mermaid(self, output_path: str | Path) -> None:
         """Write the current graph diagram to disk."""
@@ -429,8 +646,14 @@ class AgenticRagService:
         )
 
         try:
-            retriever = vectorstore.as_retriever(search_kwargs={"k": self.settings.retrieval_k})
-            retriever_tool = create_retriever_tool(retriever)
+            retriever = vectorstore.as_retriever(
+                search_kwargs={"k": retrieval_fetch_k(self.settings.retrieval_k)}
+            )
+            reranking_retriever = RerankingRetriever(
+                retriever,
+                final_k=self.settings.retrieval_k,
+            )
+            retriever_tool = create_retriever_tool(reranking_retriever)
             response_model = self._create_chat_model(chat_config)
             grader_model = self._create_chat_model(chat_config)
             graph = build_agentic_rag_graph(
@@ -447,32 +670,40 @@ class AgenticRagService:
 
         return graph, document_count, vectorstore
 
-    def _create_chat_model(self, config: Any) -> Any:
+    def _create_chat_model(self, config: ResolvedProviderConfig) -> RetryingChatModel:
         try:
-            return create_chat_model(config)
+            model = create_chat_model(config)
         except Exception as exc:
             raise LLMError(
                 f"Failed to create the chat model for provider '{config.provider}'."
             ) from exc
+        return RetryingChatModel(model=model)
 
-    def _create_embeddings(self, config: Any) -> Embeddings:
+    def _create_embeddings(self, config: ResolvedProviderConfig) -> Embeddings:
         try:
-            return create_embeddings(config)
+            embeddings = create_embeddings(config)
         except Exception as exc:
             raise LLMError(
                 f"Failed to create the embeddings client for provider '{config.provider}'."
             ) from exc
+        return RetryingEmbeddings(embeddings=embeddings)
 
-    def _resolve_provider_configs(self) -> tuple[Any, Any]:
+    def _resolve_provider_configs(
+        self,
+    ) -> tuple[ResolvedProviderConfig, ResolvedProviderConfig]:
         chat_config = resolve_chat_config(self.settings)
         embedding_config = resolve_embedding_config(self.settings, chat_config)
         return chat_config, embedding_config
 
-    def _index_status(self, *, document_count: int | None = None) -> IndexStatus:
-        status = self.index_status()
+    def _known_index_status(
+        self,
+        *,
+        exists: bool,
+        document_count: int | None = None,
+    ) -> IndexStatus:
         return IndexStatus(
-            cache_path=status.cache_path,
-            fingerprint=status.fingerprint,
-            exists=status.exists,
+            cache_path=index_cache_path(self.settings),
+            fingerprint=index_fingerprint(self.settings),
+            exists=exists,
             document_count=document_count,
         )

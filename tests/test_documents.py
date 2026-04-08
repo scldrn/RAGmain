@@ -8,8 +8,15 @@ from langchain_core.documents import Document
 from agentic_rag.documents import (
     DEFAULT_FETCH_MAX_ATTEMPTS,
     DEFAULT_FETCH_RETRY_BACKOFF_SECONDS,
+    _is_noise_line,
+    _is_title_case_heading_word,
     _load_documents_with_retries,
+    _looks_like_outline_heading,
+    _looks_like_sentence_line,
     _retry_delay_seconds,
+    _strip_leading_outline,
+    clean_document_content,
+    clean_documents,
     load_documents,
     preprocess_documents,
     split_documents,
@@ -129,6 +136,161 @@ def test_load_documents_raises_typed_error_when_all_urls_fail(monkeypatch):
 
     with pytest.raises(DocumentLoadError, match="Failed to load any source documents"):
         load_documents(["https://bad-url.example"])
+
+
+def test_clean_document_content_strips_navigation_and_reference_tail():
+    raw_text = """
+    Lil'Log
+    Posts
+    Archive
+    Search
+    Tags
+    FAQ
+
+    Reward hacking occurs when an agent exploits flaws in the reward function.
+    It can optimize a proxy reward without achieving the intended task.
+
+    Citation
+    Or @article{weng2024rewardhack,
+      title = "Reward Hacking in Reinforcement Learning."
+    }
+    References
+    [1] Example citation
+    """.strip()
+
+    cleaned = clean_document_content(raw_text)
+
+    assert "Posts" not in cleaned
+    assert "Archive" not in cleaned
+    assert "References" not in cleaned
+    assert "Reward hacking occurs when an agent exploits flaws" in cleaned
+
+
+def test_is_noise_line_detects_powered_by_and_date_metadata():
+    assert _is_noise_line("Powered by Hugo") is True
+    assert _is_noise_line("Date: November 28, 2024") is True
+    assert _is_noise_line("Estimated reading time: 10 min") is True
+
+
+def test_is_noise_line_detects_symbol_only_lines():
+    assert _is_noise_line("###") is True
+
+
+def test_clean_documents_preserves_metadata():
+    documents = [
+        Document(
+            page_content="Lil'Log\nReward hacking occurs when reward functions are exploitable.",
+            metadata={"source": "https://example.com/doc", "title": "Doc"},
+        )
+    ]
+
+    cleaned = clean_documents(documents)
+
+    assert cleaned[0].metadata == {"source": "https://example.com/doc", "title": "Doc"}
+    assert "Lil'Log" not in cleaned[0].page_content
+    assert "Reward hacking occurs" in cleaned[0].page_content
+
+
+def test_clean_document_content_strips_leading_heading_outline():
+    raw_text = """
+    Reward Hacking in Reinforcement Learning | Lil'Log
+    Reward Hacking in Reinforcement Learning
+    Background
+    Reward Function in RL
+    Spurious Correlation
+    Let’s Define Reward Hacking
+    Reward hacking occurs when an agent exploits flaws in the reward function.
+    It can optimize a proxy reward without achieving the intended task.
+    """.strip()
+
+    cleaned = clean_document_content(raw_text)
+
+    assert cleaned.startswith(
+        "Reward hacking occurs when an agent exploits flaws in the reward function."
+    )
+    assert "Background" not in cleaned
+
+
+def test_clean_document_content_strips_question_style_outline_headings():
+    raw_text = """
+    Why does Reward Hacking Exist?
+    Hacking RL Environment
+    Hacking RLHF of LLMs
+    Reward hacking occurs when an agent exploits flaws in the reward function.
+    It can optimize a proxy reward without achieving the intended task.
+    """.strip()
+
+    cleaned = clean_document_content(raw_text)
+
+    assert cleaned.startswith(
+        "Reward hacking occurs when an agent exploits flaws in the reward function."
+    )
+    assert "Why does Reward Hacking Exist?" not in cleaned
+    assert "Hacking RL Environment" not in cleaned
+
+
+def test_clean_document_content_strips_long_title_case_question_outline_headings():
+    raw_text = """
+    Why Does Reward Hacking Exist in Reinforcement Learning Systems?
+    Reward Tampering
+    Goal Misgeneralization
+    Reward hacking occurs when an agent exploits flaws in the reward function.
+    It can optimize a proxy reward without achieving the intended task.
+    """.strip()
+
+    cleaned = clean_document_content(raw_text)
+
+    assert cleaned.startswith(
+        "Reward hacking occurs when an agent exploits flaws in the reward function."
+    )
+    assert "Why Does Reward Hacking Exist in Reinforcement Learning Systems?" not in cleaned
+    assert "Reward Tampering" not in cleaned
+
+
+def test_clean_document_content_deduplicates_adjacent_lines():
+    cleaned = clean_document_content(
+        "Reward hacking occurs when an agent exploits flaws\n"
+        "Reward hacking occurs when an agent exploits flaws\n"
+        "It can optimize a proxy reward."
+    )
+
+    assert cleaned.count("Reward hacking occurs when an agent exploits flaws") == 1
+
+
+def test_clean_document_content_falls_back_to_normalized_text_when_everything_is_filtered():
+    cleaned = clean_document_content("Posts\nArchive\nSearch")
+
+    assert cleaned == "Posts Archive Search"
+
+
+def test_strip_leading_outline_handles_empty_input():
+    assert _strip_leading_outline([]) == []
+
+
+def test_looks_like_sentence_line_detects_question_and_long_text_and_reward_hacking_phrase():
+    assert (
+        _looks_like_sentence_line("What training budget was used in reward hacking studies?")
+        is True
+    )
+    assert (
+        _looks_like_sentence_line(
+            "Why Does Reward Hacking Exist in Reinforcement Learning Systems?"
+        )
+        is False
+    )
+    assert (
+        _looks_like_sentence_line("one two three four five six seven eight nine ten eleven twelve")
+        is True
+    )
+    assert _looks_like_sentence_line("reward hacking occurs when agents exploit proxies") is True
+
+
+def test_looks_like_outline_heading_rejects_short_question_fragments():
+    assert _looks_like_outline_heading("Why now?") is False
+
+
+def test_is_title_case_heading_word_accepts_acronyms():
+    assert _is_title_case_heading_word("RLHF") is True
 
 
 def test_retry_delay_seconds_uses_exponential_backoff():

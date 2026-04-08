@@ -22,9 +22,12 @@ from agentic_rag.settings import AgenticRagSettings, normalize_provider_name
 
 
 def _config(
-    provider: str, model: str = "test-model", api_key: str = "key"
+    provider: str,
+    model: str = "test-model",
+    api_key: str = "key",
+    **kwargs,
 ) -> ResolvedProviderConfig:
-    return ResolvedProviderConfig(provider=provider, model=model, api_key=api_key)
+    return ResolvedProviderConfig(provider=provider, model=model, api_key=api_key, **kwargs)
 
 
 def _mock_modules(**mocks: MagicMock):
@@ -39,6 +42,7 @@ def test_google_chat_config_accepts_gemini_api_key(monkeypatch):
     settings = AgenticRagSettings(
         chat_provider="google",
         chat_model="gemini-2.5-flash",
+        chat_api_key_env=None,
         embedding_provider="google",
         embedding_model="gemini-embedding-2-preview",
     )
@@ -46,6 +50,8 @@ def test_google_chat_config_accepts_gemini_api_key(monkeypatch):
     config = resolve_chat_config(settings)
 
     assert config.api_key == "gemini-key"
+    assert config.timeout_seconds == settings.model_timeout_seconds
+    assert config.max_retries == 0
 
 
 def test_openai_compatible_embedding_inherits_chat_credentials():
@@ -82,8 +88,10 @@ def test_openai_compatible_requires_api_base():
             chat_provider="openai-compatible",
             chat_model="local-model",
             chat_api_key="key",
+            chat_api_base=None,
             embedding_provider="openai-compatible",
             embedding_model="text-embedding-3-small",
+            embedding_api_base=None,
         )
 
 
@@ -113,19 +121,29 @@ def test_resolve_chat_config_raises_typed_error_for_missing_credentials():
 
 
 def test_create_chat_model_google():
-    mock_google = MagicMock(ChatGoogleGenerativeAI=MagicMock(return_value=MagicMock()))
+    constructor = MagicMock(return_value=MagicMock())
+    mock_google = MagicMock(ChatGoogleGenerativeAI=constructor)
     with _mock_modules(langchain_google_genai=mock_google):
-        config = _config("google")
+        config = _config("google", timeout_seconds=12.5, max_retries=0)
         model = create_chat_model(config)
         assert model is not None
+
+    constructor.assert_called_once()
+    assert constructor.call_args.kwargs["timeout"] == 12.5
+    assert constructor.call_args.kwargs["max_retries"] == 0
 
 
 def test_create_chat_model_openai():
-    mock_openai = MagicMock(ChatOpenAI=MagicMock(return_value=MagicMock()))
+    constructor = MagicMock(return_value=MagicMock())
+    mock_openai = MagicMock(ChatOpenAI=constructor)
     with _mock_modules(langchain_openai=mock_openai):
-        config = _config("openai")
+        config = _config("openai", timeout_seconds=7.5, max_retries=0)
         model = create_chat_model(config)
         assert model is not None
+
+    constructor.assert_called_once()
+    assert constructor.call_args.kwargs["request_timeout"] == 7.5
+    assert constructor.call_args.kwargs["max_retries"] == 0
 
 
 def test_create_chat_model_openai_compatible():
@@ -169,11 +187,15 @@ def test_create_chat_model_unsupported_raises():
 
 
 def test_create_embeddings_google():
-    mock_google = MagicMock(GoogleGenerativeAIEmbeddings=MagicMock(return_value=MagicMock()))
+    constructor = MagicMock(return_value=MagicMock())
+    mock_google = MagicMock(GoogleGenerativeAIEmbeddings=constructor)
     with _mock_modules(langchain_google_genai=mock_google):
-        config = _config("google")
+        config = _config("google", timeout_seconds=8.0, max_retries=0)
         emb = create_embeddings(config)
         assert emb is not None
+
+    constructor.assert_called_once()
+    assert constructor.call_args.kwargs["request_options"] == {"timeout": 8.0}
 
 
 def test_create_embeddings_openai():
@@ -210,7 +232,11 @@ def test_litellm_embeddings_adapter_embed_documents():
     mock_litellm = MagicMock()
     mock_litellm.embedding.return_value = fake_response
 
-    adapter = LiteLLMEmbeddingsAdapter(model="openai/text-embedding-3-small", api_key="key")
+    adapter = LiteLLMEmbeddingsAdapter(
+        model="openai/text-embedding-3-small",
+        api_key="key",
+        timeout_seconds=9.0,
+    )
 
     with patch.dict("sys.modules", {"litellm": mock_litellm}):
         result = adapter.embed_documents(["hello world"])
@@ -221,6 +247,7 @@ def test_litellm_embeddings_adapter_embed_documents():
         input=["hello world"],
         api_key="key",
         api_base=None,
+        timeout=9.0,
     )
 
 
@@ -367,11 +394,15 @@ def test_create_chat_model_anthropic_passes_base_url():
             model="claude",
             api_key="key",
             api_base="https://anthropic.example",
+            timeout_seconds=11.0,
+            max_retries=0,
         )
         create_chat_model(config)
 
     constructor.assert_called_once()
     assert constructor.call_args.kwargs["base_url"] == "https://anthropic.example"
+    assert constructor.call_args.kwargs["default_request_timeout"] == 11.0
+    assert constructor.call_args.kwargs["max_retries"] == 0
 
 
 def test_create_chat_model_litellm_passes_api_key_and_base():
@@ -383,12 +414,16 @@ def test_create_chat_model_litellm_passes_api_key_and_base():
             model="openai/gpt-4.1-mini",
             api_key="litellm-key",
             api_base="https://litellm.example",
+            timeout_seconds=9.0,
+            max_retries=0,
         )
         create_chat_model(config)
 
     constructor.assert_called_once()
     assert constructor.call_args.kwargs["api_key"] == "litellm-key"
     assert constructor.call_args.kwargs["api_base"] == "https://litellm.example"
+    assert constructor.call_args.kwargs["request_timeout"] == 9.0
+    assert constructor.call_args.kwargs["max_retries"] == 0
 
 
 def test_create_embeddings_openai_compatible_passes_base_url():
@@ -400,8 +435,12 @@ def test_create_embeddings_openai_compatible_passes_base_url():
             model="text-embedding-3-small",
             api_key="key",
             api_base="https://openai.example",
+            timeout_seconds=6.0,
+            max_retries=0,
         )
         create_embeddings(config)
 
     constructor.assert_called_once()
     assert constructor.call_args.kwargs["base_url"] == "https://openai.example"
+    assert constructor.call_args.kwargs["request_timeout"] == 6.0
+    assert constructor.call_args.kwargs["max_retries"] == 0

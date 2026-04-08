@@ -154,11 +154,11 @@ python -m agentic_rag --help
 
 1. Load and split source documents.
 2. Build or reuse a cached vector index.
-3. Let the graph decide whether to answer directly or retrieve.
-4. Retrieve relevant chunks as a tool call.
-5. Grade retrieved context.
-6. Rewrite the question if retrieval quality is weak.
-7. Stop at `insufficient_context` if rewrites are exhausted, otherwise generate a final cited answer.
+3. Retrieve relevant chunks as a tool call.
+4. Grade retrieved context against the current retrieval query.
+5. Rewrite the question if retrieval quality is weak.
+6. Normalize rewrites down to a concise retrieval query instead of feeding explanation-heavy text back into retrieval.
+7. Stop at `insufficient_context` if rewrites are exhausted or if a rewrite stalls without improving the query, otherwise generate a final cited answer.
 
 ## Default Sources
 
@@ -181,6 +181,24 @@ Run the local quality gates:
 make check
 ```
 
+Run the offline Phase 2 dense baseline:
+
+```bash
+make eval-baseline
+```
+
+Run the checked-in hybrid snapshot:
+
+```bash
+make eval-hybrid
+```
+
+Compare the current hybrid run against the checked-in dense baseline:
+
+```bash
+make eval-compare
+```
+
 Equivalent individual commands:
 
 ```bash
@@ -189,6 +207,8 @@ ruff format --check .
 mypy src/agentic_rag
 pytest --cov=src/agentic_rag --cov-report=term-missing --cov-fail-under=85
 ```
+
+The Phase 2 starter corpus and checked-in dense/hybrid baselines live under `tests/eval/`. The harness is implemented in `src/agentic_rag/evaluation.py` and runs without external APIs so retrieval changes can be compared locally before promoting them.
 
 Main files:
 
@@ -205,8 +225,14 @@ Main files:
 - `python -m agentic_rag --question "..."` remains supported as a legacy shortcut for `python -m agentic_rag query --question "..."`.
 - `INGESTION_MODE=auto` builds a missing index on first query. `INGESTION_MODE=explicit` requires calling `AgenticRagService.ingest()` before querying.
 - `MAX_REWRITES` bounds rewrite loops. When retrieval remains weak after that limit, the service returns a structured `insufficient_context` termination reason and a graceful fallback answer.
+- `RETRIEVAL_MODE=dense` remains the baseline. `RETRIEVAL_MODE=hybrid` now enables a local Qdrant dense+lexical hybrid index and keeps a separate cache fingerprint from the dense index.
+- Query-time retrieval now expands the candidate pool, applies deterministic reranking, trims boilerplate-heavy chunks, deduplicates repeated context, and balances sources before passing context to the model.
+- The offline Phase 2 dense and hybrid snapshots are currently aligned under the deterministic reranking path; keep the harness for regression checks when retrieval changes.
+- Rewrite loops now sanitize verbose rewrite outputs into a concise query and stop earlier when a rewrite fails to improve the retrieval query.
 - Corrupted or incomplete Qdrant cache directories are detected and rebuilt automatically.
 - Document fetches use per-request timeouts, retry each URL, and continue indexing with the remaining sources when only some URLs fail.
+- `MODEL_TIMEOUT_SECONDS` applies to provider clients, and transient chat/embedding failures retry with exponential backoff before surfacing a typed error.
+- Graph diagram export is static and does not require an existing index.
 - `--verbose` enables startup diagnostics and runtime logging for command, providers, cache path, index state, and final query outcome.
 - The first run for a new source/config combination builds embeddings and writes a local Qdrant index.
 - Later runs reuse the cached vector index and are much cheaper/faster.

@@ -9,12 +9,21 @@ from collections.abc import Sequence
 from typing import cast
 
 from agentic_rag.errors import AgenticRagError, ConfigurationError
-from agentic_rag.graph import message_text
+from agentic_rag.presentation import format_index_status, format_query_step
 from agentic_rag.service import AgenticRagService, HealthStatus, IndexStatus, QueryStep
 from agentic_rag.settings import (
+    DEFAULT_CHAT_MODELS,
+    DEFAULT_EMBEDDING_MODELS,
+    DEFAULT_SOURCE_URLS,
     SUPPORTED_CHAT_PROVIDERS,
     SUPPORTED_EMBEDDING_PROVIDERS,
     AgenticRagSettings,
+    _read_float_env,
+    _read_int_env,
+    default_chat_provider,
+    default_ingestion_mode,
+    default_retrieval_mode,
+    normalize_provider_name,
 )
 
 CLI_COMMANDS = ("query", "ingest")
@@ -160,49 +169,77 @@ def build_parser() -> argparse.ArgumentParser:
     return parser
 
 
+def _read_optional_env(*names: str) -> str | None:
+    for name in names:
+        raw_value = os.getenv(name)
+        if raw_value is None:
+            continue
+        normalized = raw_value.strip()
+        if normalized:
+            return normalized
+    return None
+
+
+def _default_embedding_provider(chat_provider: str) -> str | None:
+    explicit_provider = normalize_provider_name(_read_optional_env("EMBEDDING_PROVIDER"))
+    if explicit_provider:
+        return explicit_provider
+    if chat_provider in SUPPORTED_EMBEDDING_PROVIDERS:
+        return chat_provider
+    return None
+
+
 def build_settings(args: argparse.Namespace) -> AgenticRagSettings:
     """Translate parsed CLI arguments into validated settings."""
-    base = AgenticRagSettings()
     source_urls = cast(list[str] | None, getattr(args, "source_urls", None))
     chunk_size = cast(int | None, getattr(args, "chunk_size", None))
     chunk_overlap = cast(int | None, getattr(args, "chunk_overlap", None))
     retrieval_k = cast(int | None, getattr(args, "retrieval_k", None))
-    chat_provider = cast(str | None, getattr(args, "chat_provider", None))
+    chat_provider_override = cast(str | None, getattr(args, "chat_provider", None))
+    chat_provider = normalize_provider_name(chat_provider_override or default_chat_provider()) or ""
     chat_model = cast(str | None, getattr(args, "chat_model", None))
     chat_api_key = cast(str | None, getattr(args, "chat_api_key", None))
     chat_api_key_env = cast(str | None, getattr(args, "chat_api_key_env", None))
     chat_api_base = cast(str | None, getattr(args, "chat_api_base", None))
     chat_temperature = cast(float | None, getattr(args, "chat_temperature", None))
-    embedding_provider = cast(str | None, getattr(args, "embedding_provider", None))
+    embedding_provider_override = cast(str | None, getattr(args, "embedding_provider", None))
+    embedding_provider = normalize_provider_name(
+        embedding_provider_override or _default_embedding_provider(chat_provider)
+    )
     embedding_model = cast(str | None, getattr(args, "embedding_model", None))
     embedding_api_key = cast(str | None, getattr(args, "embedding_api_key", None))
     embedding_api_key_env = cast(str | None, getattr(args, "embedding_api_key_env", None))
     embedding_api_base = cast(str | None, getattr(args, "embedding_api_base", None))
 
     return AgenticRagSettings(
-        source_urls=source_urls or base.source_urls,
-        chunk_size=chunk_size if chunk_size is not None else base.chunk_size,
-        chunk_overlap=chunk_overlap if chunk_overlap is not None else base.chunk_overlap,
-        retrieval_k=retrieval_k if retrieval_k is not None else base.retrieval_k,
-        chat_provider=chat_provider or base.chat_provider,
-        chat_model=chat_model or base.chat_model,
-        chat_api_key=chat_api_key or base.chat_api_key,
-        chat_api_key_env=chat_api_key_env or base.chat_api_key_env,
-        chat_api_base=chat_api_base or base.chat_api_base,
-        chat_temperature=(
-            chat_temperature if chat_temperature is not None else base.chat_temperature
-        ),
-        embedding_provider=embedding_provider or base.embedding_provider,
-        embedding_model=embedding_model or base.embedding_model,
-        embedding_api_key=embedding_api_key or base.embedding_api_key,
-        embedding_api_key_env=embedding_api_key_env or base.embedding_api_key_env,
-        embedding_api_base=embedding_api_base or base.embedding_api_base,
-        index_cache_dir=base.index_cache_dir,
-        ingestion_mode=base.ingestion_mode,
-        retrieval_mode=base.retrieval_mode,
-        max_rewrites=base.max_rewrites,
-        fetch_timeout_seconds=base.fetch_timeout_seconds,
-        model_timeout_seconds=base.model_timeout_seconds,
+        source_urls=tuple(source_urls or DEFAULT_SOURCE_URLS),
+        chunk_size=chunk_size if chunk_size is not None else 1200,
+        chunk_overlap=chunk_overlap if chunk_overlap is not None else 200,
+        retrieval_k=retrieval_k if retrieval_k is not None else 6,
+        chat_provider=chat_provider,
+        chat_model=chat_model
+        or _read_optional_env("CHAT_MODEL", "LLM_MODEL")
+        or DEFAULT_CHAT_MODELS.get(chat_provider, ""),
+        chat_api_key=chat_api_key or _read_optional_env("CHAT_API_KEY", "LLM_API_KEY"),
+        chat_api_key_env=chat_api_key_env
+        or _read_optional_env("CHAT_API_KEY_ENV", "LLM_API_KEY_ENV"),
+        chat_api_base=chat_api_base or _read_optional_env("CHAT_API_BASE", "LLM_API_BASE"),
+        chat_temperature=chat_temperature
+        if chat_temperature is not None
+        else _read_float_env("CHAT_TEMPERATURE", "LLM_TEMPERATURE", default=0.0),
+        embedding_provider=embedding_provider,
+        embedding_model=embedding_model
+        or _read_optional_env("EMBEDDING_MODEL")
+        or (DEFAULT_EMBEDDING_MODELS.get(embedding_provider) if embedding_provider else None),
+        embedding_api_key=embedding_api_key or _read_optional_env("EMBEDDING_API_KEY"),
+        embedding_api_key_env=embedding_api_key_env or _read_optional_env("EMBEDDING_API_KEY_ENV"),
+        embedding_api_base=embedding_api_base or _read_optional_env("EMBEDDING_API_BASE"),
+        index_cache_dir=_read_optional_env("INDEX_CACHE_DIR") or ".cache/vectorstores",
+        ingestion_mode=default_ingestion_mode(),
+        retrieval_mode=default_retrieval_mode(),
+        max_rewrites=_read_int_env("MAX_REWRITES", default=3),
+        fetch_timeout_seconds=_read_float_env("FETCH_TIMEOUT_SECONDS", default=20.0),
+        model_timeout_seconds=_read_float_env("MODEL_TIMEOUT_SECONDS", default=60.0),
     )
 
 
@@ -236,10 +273,8 @@ def log_startup_diagnostics(
 ) -> None:
     """Log the startup configuration and current index state."""
     current_health = health or service.health()
-    current_index_status = index_status or service.index_status()
     logger.info(
-        "startup command=%s chat=%s/%s embedding=%s/%s ingestion_mode=%s "
-        "retrieval_mode=%s cache=%s index_exists=%s document_count=%s",
+        "startup command=%s chat=%s/%s embedding=%s/%s ingestion_mode=%s retrieval_mode=%s",
         command,
         current_health.chat_provider,
         current_health.chat_model,
@@ -247,6 +282,20 @@ def log_startup_diagnostics(
         current_health.embedding_model,
         current_health.ingestion_mode,
         current_health.retrieval_mode,
+    )
+    current_index_status = index_status
+    if current_index_status is None:
+        try:
+            current_index_status = service.index_status()
+        except Exception as exc:
+            logger.warning(
+                "startup_index_status_unavailable; continuing without index diagnostics",
+                exc_info=exc,
+            )
+            return
+
+    logger.info(
+        "startup_index cache=%s index_exists=%s document_count=%s",
         current_index_status.cache_path,
         current_index_status.exists,
         current_index_status.document_count,
@@ -255,33 +304,28 @@ def log_startup_diagnostics(
 
 def print_step(step: QueryStep) -> None:
     """Render a single streamed query step to stdout."""
-    print(f"\n[{step.node_name}]")
-    tool_calls = getattr(step.message, "tool_calls", None) or []
-    for tool_call in tool_calls:
-        print(f"tool: {tool_call['name']} args={tool_call['args']}")
-    text = message_text(step.message).strip()
-    if text:
-        print(text)
+    print()
+    print(format_query_step(step))
 
 
 def print_index_status(status: IndexStatus) -> None:
     """Render the current index status after an explicit ingest."""
-    print("\nIndex ready:\n")
-    print(f"documents: {status.document_count or 0}")
-    print(f"cache: {status.cache_path}")
-    print(f"fingerprint: {status.fingerprint}")
+    print()
+    print(format_index_status(status))
 
 
 def main() -> int:
     configure_runtime_warnings()
     parser = build_parser()
     args = parser.parse_args(normalize_cli_argv(sys.argv[1:]))
-    configure_logging(verbose=cast(bool, getattr(args, "verbose", False)))
+    verbose = cast(bool, getattr(args, "verbose", False))
+    configure_logging(verbose=verbose)
 
     try:
         settings = build_settings(args)
         service = AgenticRagService(settings=settings)
-        log_startup_diagnostics(service, command=args.command)
+        if verbose:
+            log_startup_diagnostics(service, command=args.command)
 
         if args.command == "ingest":
             status = service.ingest()

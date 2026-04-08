@@ -5,7 +5,7 @@ from typing import Optional
 
 from langchain_core.messages import BaseMessage
 
-from agentic_rag.graph import message_text
+from agentic_rag.presentation import format_query_step
 from agentic_rag.service import AgenticRagService, QueryStep
 from agentic_rag.settings import AgenticRagSettings
 
@@ -18,10 +18,13 @@ class AgenticRagApp:
 
 
 def create_agentic_rag_app(settings: Optional[AgenticRagSettings] = None) -> AgenticRagApp:
-    """Compatibility wrapper that prepares the shared service layer eagerly."""
+    """Compatibility wrapper that prepares the shared service layer."""
     settings = settings or AgenticRagSettings()
     service = AgenticRagService(settings=settings)
-    index_status = service.ingest()
+    if settings.ingestion_mode == "auto":
+        index_status = service.ingest()
+    else:
+        index_status = service.index_status()
 
     return AgenticRagApp(
         settings=settings,
@@ -34,13 +37,8 @@ def run_question(app: AgenticRagApp, question: str, *, show_steps: bool = False)
     """Compatibility wrapper around the service-layer query interface."""
 
     def print_step(step: QueryStep) -> None:
-        print(f"\n[{step.node_name}]")
-        tool_calls = getattr(step.message, "tool_calls", None) or []
-        for tool_call in tool_calls:
-            print(f"tool: {tool_call['name']} args={tool_call['args']}")
-        text = message_text(step.message).strip()
-        if text:
-            print(text)
+        print()
+        print(format_query_step(step))
 
     result = app.service.query(question, on_step=print_step if show_steps else None)
     return result.final_message

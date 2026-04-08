@@ -136,9 +136,11 @@ def test_settings_reject_openai_compatible_without_chat_api_base():
             chat_provider="openai-compatible",
             chat_model="local-model",
             chat_api_key="key",
+            chat_api_base=None,
             embedding_provider="openai-compatible",
             embedding_model="text-embedding-3-small",
             embedding_api_key="key",
+            embedding_api_base=None,
             # no chat_api_base — should fail
         )
 

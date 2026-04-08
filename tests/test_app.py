@@ -180,6 +180,30 @@ def test_create_agentic_rag_app_propagates_ingest_error(monkeypatch, tmp_path):
         create_agentic_rag_app(settings)
 
 
+def test_create_agentic_rag_app_explicit_mode_does_not_ingest(monkeypatch, tmp_path):
+    settings = AgenticRagSettings(
+        **{**_make_settings(tmp_path).__dict__, "ingestion_mode": "explicit"}
+    )
+    status = IndexStatus(
+        cache_path=_make_index_status(tmp_path).cache_path,
+        fingerprint="abc123",
+        exists=False,
+        document_count=None,
+    )
+
+    mock_service = MagicMock()
+    mock_service.index_status.return_value = status
+    MockServiceClass = MagicMock(return_value=mock_service)
+
+    monkeypatch.setattr("agentic_rag.app.AgenticRagService", MockServiceClass)
+
+    app = create_agentic_rag_app(settings)
+
+    mock_service.ingest.assert_not_called()
+    mock_service.index_status.assert_called_once_with()
+    assert app.document_count == 0
+
+
 def test_package_main_exits_with_cli_status(monkeypatch):
     monkeypatch.setattr("agentic_rag.cli.main", lambda: 7)
 

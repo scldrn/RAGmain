@@ -8,6 +8,7 @@ from unittest.mock import MagicMock
 import pytest
 
 from agentic_rag.cli import (
+    _default_embedding_provider,
     build_parser,
     build_settings,
     configure_logging,
@@ -143,6 +144,43 @@ def test_build_settings_uses_default_urls_when_none_provided():
     assert len(settings.source_urls) > 0
 
 
+def test_build_settings_allows_cli_embedding_overrides_over_invalid_env(monkeypatch):
+    monkeypatch.setenv("CHAT_PROVIDER", "anthropic")
+    monkeypatch.delenv("EMBEDDING_PROVIDER", raising=False)
+    monkeypatch.delenv("EMBEDDING_MODEL", raising=False)
+
+    parser = build_parser()
+    args = parser.parse_args(
+        [
+            "query",
+            "--question",
+            "test",
+            "--embedding-provider",
+            "openai",
+            "--embedding-model",
+            "text-embedding-3-small",
+        ]
+    )
+
+    settings = build_settings(args)
+
+    assert settings.chat_provider == "anthropic"
+    assert settings.embedding_provider == "openai"
+    assert settings.embedding_model == "text-embedding-3-small"
+
+
+def test_default_embedding_provider_falls_back_to_chat_provider(monkeypatch):
+    monkeypatch.delenv("EMBEDDING_PROVIDER", raising=False)
+
+    assert _default_embedding_provider("google") == "google"
+
+
+def test_default_embedding_provider_returns_none_for_chat_only_provider(monkeypatch):
+    monkeypatch.delenv("EMBEDDING_PROVIDER", raising=False)
+
+    assert _default_embedding_provider("anthropic") is None
+
+
 # ---------------------------------------------------------------------------
 # configure_runtime_warnings
 # ---------------------------------------------------------------------------
@@ -228,7 +266,29 @@ def test_log_startup_diagnostics_logs_expected_context(caplog):
 
     assert "startup command=query" in caplog.text
     assert "chat=google/gemini-2.5-flash" in caplog.text
+    assert "startup_index cache=/tmp/cache/index" in caplog.text
     assert "document_count=7" in caplog.text
+
+
+def test_log_startup_diagnostics_tolerates_index_status_failures(caplog):
+    health = HealthStatus(
+        ok=True,
+        chat_provider="google",
+        chat_model="gemini-2.5-flash",
+        embedding_provider="google",
+        embedding_model="gemini-embedding-2-preview",
+        ingestion_mode="auto",
+        retrieval_mode="dense",
+        index_cache_dir=Path("/tmp/cache"),
+    )
+    service = MagicMock()
+    service.health.return_value = health
+    service.index_status.side_effect = OSError("bad cache")
+
+    with caplog.at_level("WARNING", logger="agentic_rag.cli"):
+        log_startup_diagnostics(service, command="query")
+
+    assert "startup_index_status_unavailable" in caplog.text
 
 
 # ---------------------------------------------------------------------------
@@ -314,6 +374,55 @@ def test_main_verbose_configures_logging(monkeypatch):
 
     assert exit_code == 0
     assert configure_calls == [True]
+
+
+def test_main_skips_startup_diagnostics_without_verbose(monkeypatch):
+    mock_service = _make_mock_service()
+    MockServiceClass = MagicMock(return_value=mock_service)
+    log_calls = []
+
+    monkeypatch.setattr(sys, "argv", ["agentic-rag", "--question", "What?"])
+    monkeypatch.setattr("agentic_rag.cli.build_settings", lambda _args: MagicMock())
+    monkeypatch.setattr("agentic_rag.cli.AgenticRagService", MockServiceClass)
+    monkeypatch.setattr(
+        "agentic_rag.cli.log_startup_diagnostics",
+        lambda *_args, **_kwargs: log_calls.append("called"),
+    )
+
+    exit_code = main()
+
+    assert exit_code == 0
+    assert log_calls == []
+
+
+def test_main_verbose_diagnostics_do_not_block_query(monkeypatch, capsys):
+    mock_result = MagicMock()
+    mock_result.answer_text = "The answer is 42."
+    mock_service = MagicMock()
+    mock_service.health.return_value = HealthStatus(
+        ok=True,
+        chat_provider="google",
+        chat_model="gemini-2.5-flash",
+        embedding_provider="google",
+        embedding_model="gemini-embedding-2-preview",
+        ingestion_mode="auto",
+        retrieval_mode="dense",
+        index_cache_dir=Path("/tmp/cache"),
+    )
+    mock_service.index_status.side_effect = OSError("bad cache")
+    mock_service.query.return_value = mock_result
+    MockServiceClass = MagicMock(return_value=mock_service)
+
+    monkeypatch.setattr(sys, "argv", ["agentic-rag", "--verbose", "--question", "What?"])
+    monkeypatch.setattr("agentic_rag.cli.build_settings", lambda _args: MagicMock())
+    monkeypatch.setattr("agentic_rag.cli.AgenticRagService", MockServiceClass)
+
+    exit_code = main()
+    captured = capsys.readouterr()
+
+    assert exit_code == 0
+    assert "The answer is 42." in captured.out
+    mock_service.query.assert_called_once_with("What?", on_step=None)
 
 
 # ---------------------------------------------------------------------------
@@ -498,6 +607,7 @@ def test_cli_module_main_guard(monkeypatch):
     monkeypatch.delenv("AGENTIC_RAG_DEBUG", raising=False)
     monkeypatch.setattr("agentic_rag.service.AgenticRagService", FakeService)
     monkeypatch.setattr(sys, "argv", ["agentic-rag", "--question", "What?"])
+    monkeypatch.delitem(sys.modules, "agentic_rag.cli", raising=False)
 
     with pytest.raises(SystemExit) as exc_info:
         runpy.run_module("agentic_rag.cli", run_name="__main__")

@@ -33,6 +33,8 @@ class ResolvedProviderConfig:
     api_key: Optional[str] = None
     api_base: Optional[str] = None
     temperature: Optional[float] = None
+    timeout_seconds: Optional[float] = None
+    max_retries: Optional[int] = None
 
 
 class LiteLLMEmbeddingsAdapter(Embeddings):
@@ -44,10 +46,12 @@ class LiteLLMEmbeddingsAdapter(Embeddings):
         model: str,
         api_key: Optional[str] = None,
         api_base: Optional[str] = None,
+        timeout_seconds: Optional[float] = None,
     ) -> None:
         self.model = model
         self.api_key = api_key
         self.api_base = api_base
+        self.timeout_seconds = timeout_seconds
 
     def embed_documents(self, texts: list[str]) -> list[list[float]]:
         import litellm
@@ -57,6 +61,7 @@ class LiteLLMEmbeddingsAdapter(Embeddings):
             input=list(texts),
             api_key=self.api_key,
             api_base=self.api_base,
+            timeout=self.timeout_seconds or 600,
         )
         return [self._embedding_from_item(item) for item in response.data]
 
@@ -150,6 +155,8 @@ def resolve_chat_config(settings: AgenticRagSettings) -> ResolvedProviderConfig:
         api_key=api_key,
         api_base=settings.chat_api_base,
         temperature=settings.chat_temperature,
+        timeout_seconds=getattr(settings, "model_timeout_seconds", None),
+        max_retries=0,
     )
 
 
@@ -197,6 +204,8 @@ def resolve_embedding_config(
         model=settings.embedding_model or DEFAULT_EMBEDDING_MODELS[provider],
         api_key=api_key,
         api_base=api_base,
+        timeout_seconds=getattr(settings, "model_timeout_seconds", None),
+        max_retries=0,
     )
 
 
@@ -211,6 +220,10 @@ def create_chat_model(config: ResolvedProviderConfig) -> BaseChatModel:
         }
         if config.api_key:
             google_kwargs["api_key"] = config.api_key
+        if config.timeout_seconds is not None:
+            google_kwargs["timeout"] = config.timeout_seconds
+        if config.max_retries is not None:
+            google_kwargs["max_retries"] = config.max_retries
         return ChatGoogleGenerativeAI(**google_kwargs)
 
     if config.provider in {"openai", "openai-compatible"}:
@@ -224,6 +237,10 @@ def create_chat_model(config: ResolvedProviderConfig) -> BaseChatModel:
             openai_kwargs["api_key"] = config.api_key
         if config.api_base:
             openai_kwargs["base_url"] = config.api_base
+        if config.timeout_seconds is not None:
+            openai_kwargs["request_timeout"] = config.timeout_seconds
+        if config.max_retries is not None:
+            openai_kwargs["max_retries"] = config.max_retries
         return ChatOpenAI(**openai_kwargs)
 
     if config.provider == "anthropic":
@@ -237,6 +254,10 @@ def create_chat_model(config: ResolvedProviderConfig) -> BaseChatModel:
             anthropic_kwargs["api_key"] = config.api_key
         if config.api_base:
             anthropic_kwargs["base_url"] = config.api_base
+        if config.timeout_seconds is not None:
+            anthropic_kwargs["default_request_timeout"] = config.timeout_seconds
+        if config.max_retries is not None:
+            anthropic_kwargs["max_retries"] = config.max_retries
         return ChatAnthropic(**anthropic_kwargs)
 
     if config.provider == "litellm":
@@ -250,6 +271,10 @@ def create_chat_model(config: ResolvedProviderConfig) -> BaseChatModel:
             litellm_kwargs["api_key"] = config.api_key
         if config.api_base:
             litellm_kwargs["api_base"] = config.api_base
+        if config.timeout_seconds is not None:
+            litellm_kwargs["request_timeout"] = config.timeout_seconds
+        if config.max_retries is not None:
+            litellm_kwargs["max_retries"] = config.max_retries
         return ChatLiteLLM(**litellm_kwargs)
 
     raise ConfigurationError(f"Unsupported chat provider '{config.provider}'.")
@@ -263,6 +288,8 @@ def create_embeddings(config: ResolvedProviderConfig) -> Embeddings:
         google_kwargs: dict[str, Any] = {"model": config.model}
         if config.api_key:
             google_kwargs["google_api_key"] = config.api_key
+        if config.timeout_seconds is not None:
+            google_kwargs["request_options"] = {"timeout": config.timeout_seconds}
         return GoogleGenerativeAIEmbeddings(**google_kwargs)
 
     if config.provider in {"openai", "openai-compatible"}:
@@ -273,6 +300,10 @@ def create_embeddings(config: ResolvedProviderConfig) -> Embeddings:
             openai_kwargs["api_key"] = config.api_key
         if config.api_base:
             openai_kwargs["base_url"] = config.api_base
+        if config.timeout_seconds is not None:
+            openai_kwargs["request_timeout"] = config.timeout_seconds
+        if config.max_retries is not None:
+            openai_kwargs["max_retries"] = config.max_retries
         return OpenAIEmbeddings(**openai_kwargs)
 
     if config.provider == "litellm":
@@ -280,6 +311,7 @@ def create_embeddings(config: ResolvedProviderConfig) -> Embeddings:
             model=config.model,
             api_key=config.api_key,
             api_base=config.api_base,
+            timeout_seconds=config.timeout_seconds,
         )
 
     raise ConfigurationError(f"Unsupported embedding provider '{config.provider}'.")

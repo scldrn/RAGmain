@@ -1,0 +1,102 @@
+{
+  "cases": [
+    {
+      "answered": true,
+      "case_id": "answer_hallucination_definition",
+      "category": "answerable",
+      "citation_valid": true,
+      "cited_document_ids": [
+        "hallucination_notes"
+      ],
+      "grounded": true,
+      "insufficient_context_correct": false,
+      "retrieval_recall": 1.0,
+      "retrieved_document_ids": [
+        "hallucination_notes"
+      ]
+    },
+    {
+      "answered": true,
+      "case_id": "answer_citation_benefit",
+      "category": "answerable",
+      "citation_valid": true,
+      "cited_document_ids": [
+        "citation_guidelines"
+      ],
+      "grounded": true,
+      "insufficient_context_correct": false,
+      "retrieval_recall": 1.0,
+      "retrieved_document_ids": [
+        "citation_guidelines"
+      ]
+    },
+    {
+      "answered": true,
+      "case_id": "adversarial_reward_hacking_paraphrase",
+      "category": "adversarial",
+      "citation_valid": true,
+      "cited_document_ids": [
+        "reward_hacking_overview"
+      ],
+      "grounded": true,
+      "insufficient_context_correct": false,
+      "retrieval_recall": 1.0,
+      "retrieved_document_ids": [
+        "reward_hacking_overview",
+        "metrics_decoy"
+      ]
+    },
+    {
+      "answered": true,
+      "case_id": "citation_temporal_consistency",
+      "category": "citation",
+      "citation_valid": true,
+      "cited_document_ids": [
+        "video_diffusion_primer"
+      ],
+      "grounded": true,
+      "insufficient_context_correct": false,
+      "retrieval_recall": 1.0,
+      "retrieved_document_ids": [
+        "video_diffusion_primer"
+      ]
+    },
+    {
+      "answered": true,
+      "case_id": "citation_grounded_answers",
+      "category": "citation",
+      "citation_valid": true,
+      "cited_document_ids": [
+        "citation_guidelines"
+      ],
+      "grounded": true,
+      "insufficient_context_correct": false,
+      "retrieval_recall": 1.0,
+      "retrieved_document_ids": [
+        "citation_guidelines"
+      ]
+    },
+    {
+      "answered": false,
+      "case_id": "unanswerable_training_budget",
+      "category": "unanswerable",
+      "citation_valid": true,
+      "cited_document_ids": [],
+      "grounded": true,
+      "insufficient_context_correct": true,
+      "retrieval_recall": 1.0,
+      "retrieved_document_ids": []
+    }
+  ],
+  "corpus_name": "phase-2-starter-corpus",
+  "corpus_version": "1.0",
+  "metrics": {
+    "cases_total": 6,
+    "citation_validity": 1.0,
+    "grounded_rate": 1.0,
+    "insufficient_context_accuracy": 1.0,
+    "retrieval_recall_at_k": 1.0
+  },
+  "retrieval_k": 3,
+  "retrieval_mode": "dense"
+}
