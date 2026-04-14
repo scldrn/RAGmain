@@ -33,6 +33,7 @@ class ResolvedProviderConfig:
     api_key: Optional[str] = None
     api_base: Optional[str] = None
     temperature: Optional[float] = None
+    max_tokens: Optional[int] = None
     timeout_seconds: Optional[float] = None
     max_retries: Optional[int] = None
 
@@ -155,6 +156,7 @@ def resolve_chat_config(settings: AgenticRagSettings) -> ResolvedProviderConfig:
         api_key=api_key,
         api_base=settings.chat_api_base,
         temperature=settings.chat_temperature,
+        max_tokens=settings.chat_max_tokens,
         timeout_seconds=getattr(settings, "model_timeout_seconds", None),
         max_retries=0,
     )
@@ -222,6 +224,8 @@ def create_chat_model(config: ResolvedProviderConfig) -> BaseChatModel:
             google_kwargs["api_key"] = config.api_key
         if config.timeout_seconds is not None:
             google_kwargs["timeout"] = config.timeout_seconds
+        if config.max_tokens is not None:
+            google_kwargs["max_output_tokens"] = config.max_tokens
         if config.max_retries is not None:
             google_kwargs["max_retries"] = config.max_retries
         return ChatGoogleGenerativeAI(**google_kwargs)
@@ -237,6 +241,8 @@ def create_chat_model(config: ResolvedProviderConfig) -> BaseChatModel:
             openai_kwargs["api_key"] = config.api_key
         if config.api_base:
             openai_kwargs["base_url"] = config.api_base
+        if config.max_tokens is not None:
+            openai_kwargs["max_tokens"] = config.max_tokens
         if config.timeout_seconds is not None:
             openai_kwargs["request_timeout"] = config.timeout_seconds
         if config.max_retries is not None:
@@ -254,6 +260,8 @@ def create_chat_model(config: ResolvedProviderConfig) -> BaseChatModel:
             anthropic_kwargs["api_key"] = config.api_key
         if config.api_base:
             anthropic_kwargs["base_url"] = config.api_base
+        if config.max_tokens is not None:
+            anthropic_kwargs["max_tokens"] = config.max_tokens
         if config.timeout_seconds is not None:
             anthropic_kwargs["default_request_timeout"] = config.timeout_seconds
         if config.max_retries is not None:
@@ -271,6 +279,8 @@ def create_chat_model(config: ResolvedProviderConfig) -> BaseChatModel:
             litellm_kwargs["api_key"] = config.api_key
         if config.api_base:
             litellm_kwargs["api_base"] = config.api_base
+        if config.max_tokens is not None:
+            litellm_kwargs["max_tokens"] = config.max_tokens
         if config.timeout_seconds is not None:
             litellm_kwargs["request_timeout"] = config.timeout_seconds
         if config.max_retries is not None:

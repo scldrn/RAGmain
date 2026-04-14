@@ -36,6 +36,12 @@ from agentic_rag.retrieval import (
 )
 from agentic_rag.settings import AgenticRagSettings
 
+QDRANT_COLLECTION_NAME = "documents"
+DEFAULT_MODEL_MAX_ATTEMPTS = 3
+DEFAULT_MODEL_RETRY_BACKOFF_SECONDS = 0.5
+logger = logging.getLogger(__name__)
+T = TypeVar("T")
+
 
 @dataclass(frozen=True)
 class QueryStep:
@@ -53,6 +59,7 @@ class IndexStatus:
     fingerprint: str
     exists: bool
     document_count: int | None = None
+    collection_name: str = QDRANT_COLLECTION_NAME
 
 
 @dataclass(frozen=True)
@@ -68,6 +75,7 @@ class HealthStatus:
     retrieval_mode: str
     index_cache_dir: Path
     detail: str | None = None
+    collection_name: str = QDRANT_COLLECTION_NAME
 
 
 @dataclass(frozen=True)
@@ -84,11 +92,14 @@ class QueryResult:
 
 
 StepHandler = Callable[[QueryStep], None]
-QDRANT_COLLECTION_NAME = "documents"
-DEFAULT_MODEL_MAX_ATTEMPTS = 3
-DEFAULT_MODEL_RETRY_BACKOFF_SECONDS = 0.5
-logger = logging.getLogger(__name__)
-T = TypeVar("T")
+
+
+def _optional_httpx() -> Any | None:
+    try:
+        import httpx
+    except Exception:  # pragma: no cover - httpx is installed in normal runtime/tests
+        return None
+    return httpx
 
 
 def _effective_embedding_api_base(settings: AgenticRagSettings) -> str | None:
@@ -99,11 +110,12 @@ def _effective_embedding_api_base(settings: AgenticRagSettings) -> str | None:
     return None
 
 
+def _qdrant_collection_name(settings: AgenticRagSettings) -> str:
+    return settings.collection_name or QDRANT_COLLECTION_NAME
+
+
 def _llm_error_message(exc: Exception, *, default: str) -> str:
-    try:
-        import httpx
-    except Exception:  # pragma: no cover - httpx is installed in normal runtime/tests
-        httpx = None  # type: ignore[assignment]
+    httpx = _optional_httpx()
 
     if httpx is not None and isinstance(exc, httpx.HTTPStatusError):
         status_code = exc.response.status_code
@@ -154,10 +166,7 @@ def _should_retry_model_error(exc: Exception) -> bool:
     if status_code is not None and 500 <= status_code < 600:
         return True
 
-    try:
-        import httpx
-    except Exception:  # pragma: no cover - httpx is installed in normal runtime/tests
-        httpx = None  # type: ignore[assignment]
+    httpx = _optional_httpx()
 
     if httpx is not None and isinstance(exc, (httpx.TimeoutException, httpx.TransportError)):
         return True
@@ -275,6 +284,7 @@ def index_fingerprint(settings: AgenticRagSettings) -> str:
         "source_urls": list(settings.source_urls),
         "chunk_size": settings.chunk_size,
         "chunk_overlap": settings.chunk_overlap,
+        "collection_name": _qdrant_collection_name(settings),
         "retrieval_mode": retrieval_mode.value,
         "document_cleaner": DOCUMENT_CLEANER_FINGERPRINT,
         "embedding_provider": settings.embedding_provider,
@@ -299,8 +309,12 @@ def _close_qdrant_client(client: QdrantClient | None) -> None:
         close()
 
 
-def _collection_document_count(client: QdrantClient) -> int:
-    return int(client.count(collection_name=QDRANT_COLLECTION_NAME, exact=True).count or 0)
+def _collection_document_count(
+    client: QdrantClient,
+    *,
+    collection_name: str = QDRANT_COLLECTION_NAME,
+) -> int:
+    return int(client.count(collection_name=collection_name, exact=True).count or 0)
 
 
 def _remove_cache_path(cache_path: Path) -> None:
@@ -320,19 +334,20 @@ def _load_existing_vectorstore(
     embeddings: Embeddings,
     retrieval_mode: RetrievalMode,
     sparse_embeddings: SparseEmbeddings | None,
+    collection_name: str = QDRANT_COLLECTION_NAME,
 ) -> QdrantVectorStore | None:
     if not cache_path.exists():
         return None
 
     client = QdrantClient(path=str(cache_path))
     try:
-        if not client.collection_exists(QDRANT_COLLECTION_NAME):
+        if not client.collection_exists(collection_name):
             _close_qdrant_client(client)
             return None
 
         return QdrantVectorStore(
             client=client,
-            collection_name=QDRANT_COLLECTION_NAME,
+            collection_name=collection_name,
             embedding=embeddings,
             retrieval_mode=retrieval_mode,
             sparse_embedding=sparse_embeddings,
@@ -349,6 +364,7 @@ def _build_vectorstore(
     embeddings: Embeddings,
     retrieval_mode: RetrievalMode,
     sparse_embeddings: SparseEmbeddings | None,
+    collection_name: str = QDRANT_COLLECTION_NAME,
 ) -> tuple[QdrantVectorStore, int]:
     try:
         documents = preprocess_documents(
@@ -370,7 +386,7 @@ def _build_vectorstore(
             documents=list(documents),
             embedding=embeddings,
             path=str(cache_path),
-            collection_name=QDRANT_COLLECTION_NAME,
+            collection_name=collection_name,
             retrieval_mode=retrieval_mode,
             sparse_embedding=sparse_embeddings,
         )
@@ -389,6 +405,7 @@ def _rebuild_corrupted_vectorstore(
     embeddings: Embeddings,
     retrieval_mode: RetrievalMode,
     sparse_embeddings: SparseEmbeddings | None,
+    collection_name: str = QDRANT_COLLECTION_NAME,
     reason: Exception | None = None,
 ) -> tuple[QdrantVectorStore, int]:
     if reason is None:
@@ -413,6 +430,7 @@ def _rebuild_corrupted_vectorstore(
         embeddings=embeddings,
         retrieval_mode=retrieval_mode,
         sparse_embeddings=sparse_embeddings,
+        collection_name=collection_name,
     )
 
 
@@ -427,6 +445,7 @@ def load_or_create_vectorstore(
     cache_exists = cache_path.exists()
     retrieval_mode = _qdrant_retrieval_mode(settings)
     sparse_embeddings = _qdrant_sparse_embeddings(settings)
+    collection_name = _qdrant_collection_name(settings)
 
     try:
         vectorstore = _load_existing_vectorstore(
@@ -434,6 +453,7 @@ def load_or_create_vectorstore(
             embeddings=embeddings,
             retrieval_mode=retrieval_mode,
             sparse_embeddings=sparse_embeddings,
+            collection_name=collection_name,
         )
     except Exception as exc:
         return _rebuild_corrupted_vectorstore(
@@ -442,10 +462,14 @@ def load_or_create_vectorstore(
             embeddings=embeddings,
             retrieval_mode=retrieval_mode,
             sparse_embeddings=sparse_embeddings,
+            collection_name=collection_name,
             reason=exc,
         )
     if vectorstore is not None:
-        return vectorstore, _collection_document_count(vectorstore.client)
+        return vectorstore, _collection_document_count(
+            vectorstore.client,
+            collection_name=collection_name,
+        )
 
     if cache_exists:
         return _rebuild_corrupted_vectorstore(
@@ -454,6 +478,7 @@ def load_or_create_vectorstore(
             embeddings=embeddings,
             retrieval_mode=retrieval_mode,
             sparse_embeddings=sparse_embeddings,
+            collection_name=collection_name,
         )
 
     if not create_if_missing:
@@ -468,6 +493,7 @@ def load_or_create_vectorstore(
         embeddings=embeddings,
         retrieval_mode=retrieval_mode,
         sparse_embeddings=sparse_embeddings,
+        collection_name=collection_name,
     )
 
 
@@ -495,6 +521,7 @@ class AgenticRagService:
                 retrieval_mode=self.settings.retrieval_mode,
                 index_cache_dir=Path(self.settings.index_cache_dir),
                 detail=str(exc),
+                collection_name=_qdrant_collection_name(self.settings),
             )
 
         return HealthStatus(
@@ -506,6 +533,7 @@ class AgenticRagService:
             ingestion_mode=self.settings.ingestion_mode,
             retrieval_mode=self.settings.retrieval_mode,
             index_cache_dir=Path(self.settings.index_cache_dir),
+            collection_name=_qdrant_collection_name(self.settings),
         )
 
     def index_status(self) -> IndexStatus:
@@ -517,8 +545,13 @@ class AgenticRagService:
         client: QdrantClient | None = None
         try:
             client = QdrantClient(path=str(cache_path))
-            exists = client.collection_exists(QDRANT_COLLECTION_NAME)
-            document_count = _collection_document_count(client) if exists else None
+            collection_name = _qdrant_collection_name(self.settings)
+            exists = client.collection_exists(collection_name)
+            document_count = (
+                _collection_document_count(client, collection_name=collection_name)
+                if exists
+                else None
+            )
         except Exception as exc:
             raise VectorStoreError(
                 f"Failed to inspect the persisted Qdrant index at '{cache_path}'."
@@ -671,22 +704,24 @@ class AgenticRagService:
         return graph, document_count, vectorstore
 
     def _create_chat_model(self, config: ResolvedProviderConfig) -> RetryingChatModel:
-        try:
-            model = create_chat_model(config)
-        except Exception as exc:
-            raise LLMError(
-                f"Failed to create the chat model for provider '{config.provider}'."
-            ) from exc
-        return RetryingChatModel(model=model)
+        return RetryingChatModel(
+            model=self._build_provider_client(
+                config,
+                factory=create_chat_model,
+                error_message=f"Failed to create the chat model for provider '{config.provider}'.",
+            )
+        )
 
     def _create_embeddings(self, config: ResolvedProviderConfig) -> Embeddings:
-        try:
-            embeddings = create_embeddings(config)
-        except Exception as exc:
-            raise LLMError(
-                f"Failed to create the embeddings client for provider '{config.provider}'."
-            ) from exc
-        return RetryingEmbeddings(embeddings=embeddings)
+        return RetryingEmbeddings(
+            embeddings=self._build_provider_client(
+                config,
+                factory=create_embeddings,
+                error_message=(
+                    f"Failed to create the embeddings client for provider '{config.provider}'."
+                ),
+            )
+        )
 
     def _resolve_provider_configs(
         self,
@@ -706,4 +741,17 @@ class AgenticRagService:
             fingerprint=index_fingerprint(self.settings),
             exists=exists,
             document_count=document_count,
+            collection_name=_qdrant_collection_name(self.settings),
         )
+
+    @staticmethod
+    def _build_provider_client(
+        config: ResolvedProviderConfig,
+        *,
+        factory: Callable[[ResolvedProviderConfig], T],
+        error_message: str,
+    ) -> T:
+        try:
+            return factory(config)
+        except Exception as exc:
+            raise LLMError(error_message) from exc

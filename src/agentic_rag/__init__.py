@@ -1,3 +1,4 @@
+from agentic_rag.api import create_api_app
 from agentic_rag.app import AgenticRagApp, create_agentic_rag_app, run_question
 from agentic_rag.errors import (
     AgenticRagError,
@@ -24,5 +25,6 @@ __all__ = [
     "ResolvedProviderConfig",
     "VectorStoreError",
     "create_agentic_rag_app",
+    "create_api_app",
     "run_question",
 ]

@@ -122,19 +122,29 @@ class BrokenDrawGraph(FakeGraph):
 
 
 class FakeQdrantClient:
-    def __init__(self, *, exists: bool = True, count: int = 0, error: Exception | None = None):
+    def __init__(
+        self,
+        *,
+        exists: bool = True,
+        count: int = 0,
+        error: Exception | None = None,
+        collection_name: str = QDRANT_COLLECTION_NAME,
+    ):
         self.exists = exists
         self.document_count = count
         self.error = error
+        self.collection_name = collection_name
         self.closed = False
 
-    def collection_exists(self, _name: str) -> bool:
+    def collection_exists(self, name: str) -> bool:
         if self.error is not None:
             raise self.error
+        if name != self.collection_name:
+            return False
         return self.exists
 
     def count(self, *, collection_name: str, exact: bool):
-        assert collection_name == QDRANT_COLLECTION_NAME
+        assert collection_name == self.collection_name
         assert exact is True
         return SimpleNamespace(count=self.document_count)
 
@@ -517,6 +527,15 @@ def test_index_fingerprint_differs_between_dense_and_hybrid(tmp_path):
     )
 
     assert index_fingerprint(dense_settings) != index_fingerprint(hybrid_settings)
+
+
+def test_index_fingerprint_differs_between_collections(tmp_path):
+    default_settings = make_settings(tmp_path)
+    alternate_settings = AgenticRagSettings(
+        **{**make_settings(tmp_path).__dict__, "collection_name": "research-notes"}
+    )
+
+    assert index_fingerprint(default_settings) != index_fingerprint(alternate_settings)
 
 
 def test_ingest_wraps_document_loader_failures(monkeypatch, tmp_path):

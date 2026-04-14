@@ -1,0 +1,405 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+usage() {
+  cat <<'EOF'
+Usage: ./scripts/isabella [options]
+
+Options:
+  --api-host HOST        API host (default: 127.0.0.1)
+  --api-port PORT        API port (default: 8000)
+  --webui-host HOST      Open WebUI host (default: 127.0.0.1)
+  --webui-port PORT      Open WebUI port (default: 8081)
+  --runtime-dir PATH     Runtime directory (default: ~/.agentic-rag/isabella)
+  --no-browser           Do not open the browser
+  -h, --help             Show this help
+EOF
+}
+
+SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
+REPO_ROOT="$(cd -- "${SCRIPT_DIR}/.." && pwd)"
+
+API_HOST="${ISABELLA_API_HOST:-127.0.0.1}"
+API_PORT="${ISABELLA_API_PORT:-8000}"
+WEBUI_HOST="${ISABELLA_WEBUI_HOST:-127.0.0.1}"
+WEBUI_PORT="${ISABELLA_WEBUI_PORT:-8081}"
+RUNTIME_DIR="${ISABELLA_RUNTIME_DIR:-$HOME/.agentic-rag/isabella}"
+OPEN_BROWSER=1
+
+while (($# > 0)); do
+  case "$1" in
+    --api-host)
+      API_HOST="$2"
+      shift 2
+      ;;
+    --api-port)
+      API_PORT="$2"
+      shift 2
+      ;;
+    --webui-host)
+      WEBUI_HOST="$2"
+      shift 2
+      ;;
+    --webui-port)
+      WEBUI_PORT="$2"
+      shift 2
+      ;;
+    --runtime-dir)
+      RUNTIME_DIR="$2"
+      shift 2
+      ;;
+    --no-browser)
+      OPEN_BROWSER=0
+      shift
+      ;;
+    -h|--help)
+      usage
+      exit 0
+      ;;
+    *)
+      echo "Unknown option: $1" >&2
+      usage >&2
+      exit 1
+      ;;
+  esac
+done
+
+die() {
+  echo "$*" >&2
+  exit 1
+}
+
+LAST_WAIT_ERROR=""
+
+tail_log() {
+  local log_path="$1"
+  if [[ -f "$log_path" ]]; then
+    echo "Recent log lines from $log_path:" >&2
+    tail -n 40 "$log_path" >&2 || true
+  fi
+}
+
+cleanup_stale_pid() {
+  local pid_file="$1"
+  if [[ ! -f "$pid_file" ]]; then
+    return
+  fi
+
+  local pid
+  pid="$(tr -d '[:space:]' <"$pid_file" || true)"
+  if [[ -z "$pid" ]] || ! kill -0 "$pid" 2>/dev/null; then
+    rm -f "$pid_file"
+  fi
+}
+
+wait_for_ok() {
+  local url="$1"
+  local timeout_seconds="$2"
+  local method="${3:-GET}"
+  local payload="${4:-}"
+  local deadline=$((SECONDS + timeout_seconds))
+  local body_file
+  body_file="$(mktemp)"
+
+  while ((SECONDS < deadline)); do
+    local code
+    if [[ -n "$payload" ]]; then
+      code="$(curl -sS -o "$body_file" -w '%{http_code}' -X "$method" "$url" -H 'Content-Type: application/json' --data "$payload" 2>/dev/null || true)"
+    else
+      code="$(curl -sS -o "$body_file" -w '%{http_code}' -X "$method" "$url" 2>/dev/null || true)"
+    fi
+
+    if [[ "$code" == 2* ]]; then
+      cat "$body_file"
+      rm -f "$body_file"
+      return 0
+    fi
+
+    sleep 1
+  done
+
+  local detail
+  detail="$(cat "$body_file" 2>/dev/null || true)"
+  rm -f "$body_file"
+  if [[ -n "$detail" ]]; then
+    LAST_WAIT_ERROR="Timed out while waiting for $url: $detail"
+    return 1
+  fi
+  LAST_WAIT_ERROR="Timed out while waiting for $url"
+  return 1
+}
+
+request_json() {
+  local method="$1"
+  local url="$2"
+  local payload="${3:-}"
+  local token="${4:-}"
+  local body_file
+  body_file="$(mktemp)"
+
+  local curl_args=(-sS -o "$body_file" -w '%{http_code}' -X "$method" "$url")
+  if [[ -n "$token" ]]; then
+    curl_args+=(-H "Authorization: Bearer $token")
+  fi
+  if [[ -n "$payload" ]]; then
+    curl_args+=(-H "Content-Type: application/json" --data "$payload")
+  fi
+
+  local code
+  code="$(curl "${curl_args[@]}" 2>/dev/null || true)"
+  local body
+  body="$(cat "$body_file" 2>/dev/null || true)"
+  rm -f "$body_file"
+
+  if [[ "$code" != 2* ]]; then
+    die "Request failed ($code) $url${body:+: $body}"
+  fi
+
+  printf '%s' "$body"
+}
+
+VENV_PY="${REPO_ROOT}/.venv/bin/python"
+if [[ ! -x "$VENV_PY" ]]; then
+  die "Missing ${VENV_PY}. Create the repo virtualenv first."
+fi
+
+API_BASE_URL="http://${API_HOST}:${API_PORT}"
+WEBUI_BASE_URL="http://${WEBUI_HOST}:${WEBUI_PORT}"
+OPEN_WEBUI_DIR="${RUNTIME_DIR}/open-webui"
+OPEN_WEBUI_VENV="${OPEN_WEBUI_DIR}/venv"
+OPEN_WEBUI_PY="${OPEN_WEBUI_VENV}/bin/python"
+OPEN_WEBUI_BIN="${OPEN_WEBUI_VENV}/bin/open-webui"
+OPEN_WEBUI_DATA_DIR="${OPEN_WEBUI_DIR}/data"
+LOGS_DIR="${RUNTIME_DIR}/logs"
+PIPE_PATH="${REPO_ROOT}/integrations/open_webui/agentic_rag_pipe.py"
+API_PID_FILE="${RUNTIME_DIR}/agentic-rag-api.pid"
+WEBUI_PID_FILE="${RUNTIME_DIR}/open-webui.pid"
+OPEN_WEBUI_LOG="${LOGS_DIR}/open-webui.log"
+API_LOG="${LOGS_DIR}/agentic-rag-api.log"
+
+mkdir -p "$RUNTIME_DIR" "$LOGS_DIR" "$OPEN_WEBUI_DIR"
+
+spawn_process() {
+  local workdir="$1"
+  local log_path="$2"
+  shift 2
+
+  WORKDIR="$workdir" LOG_PATH="$log_path" "$VENV_PY" - "$@" <<'PY'
+import os
+import subprocess
+import sys
+
+command = sys.argv[1:]
+with open(os.environ["LOG_PATH"], "ab") as log_file:
+    process = subprocess.Popen(
+        command,
+        cwd=os.environ["WORKDIR"],
+        env=os.environ.copy(),
+        stdin=subprocess.DEVNULL,
+        stdout=log_file,
+        stderr=subprocess.STDOUT,
+        start_new_session=True,
+    )
+print(process.pid)
+PY
+}
+
+ensure_open_webui_installed() {
+  if [[ -x "$OPEN_WEBUI_BIN" ]]; then
+    return
+  fi
+
+  "$VENV_PY" -m venv "$OPEN_WEBUI_VENV"
+  "$OPEN_WEBUI_PY" -m pip install --upgrade pip
+  "$OPEN_WEBUI_PY" -m pip install open-webui
+}
+
+ensure_api_running() {
+  cleanup_stale_pid "$API_PID_FILE"
+  if curl -fsS "${API_BASE_URL}/health" >/dev/null 2>&1; then
+    return
+  fi
+
+  local pid
+  pid="$(
+    AGENTIC_RAG_API_HOST="$API_HOST" AGENTIC_RAG_API_PORT="$API_PORT" \
+      spawn_process "$REPO_ROOT" "$API_LOG" "$VENV_PY" -m agentic_rag.api
+  )"
+  printf '%s\n' "$pid" >"$API_PID_FILE"
+
+  if ! wait_for_ok "${API_BASE_URL}/health" 60 >/dev/null; then
+    tail_log "$API_LOG"
+    die "$LAST_WAIT_ERROR"
+  fi
+}
+
+ensure_open_webui_running() {
+  cleanup_stale_pid "$WEBUI_PID_FILE"
+  if curl -fsS "${WEBUI_BASE_URL}/health" >/dev/null 2>&1; then
+    return
+  fi
+
+  ensure_open_webui_installed
+
+  local pid
+  pid="$(
+    DATA_DIR="$OPEN_WEBUI_DATA_DIR" \
+      WEBUI_SECRET_KEY="isabella-local-open-webui" \
+      WEBUI_AUTH="False" \
+      OFFLINE_MODE="true" \
+      RAG_EMBEDDING_ENGINE="openai" \
+      RAG_EMBEDDING_MODEL="text-embedding-3-small" \
+      RAG_EMBEDDING_MODEL_AUTO_UPDATE="false" \
+      RAG_RERANKING_MODEL_AUTO_UPDATE="false" \
+      AUDIO_STT_ENGINE="webapi" \
+      ENABLE_IMAGE_GENERATION="false" \
+      ENABLE_CODE_INTERPRETER="false" \
+      ENABLE_AUTOCOMPLETE_GENERATION="false" \
+      ENABLE_FOLLOW_UP_GENERATION="false" \
+      ENABLE_TITLE_GENERATION="false" \
+      ENABLE_TAGS_GENERATION="false" \
+      spawn_process "$RUNTIME_DIR" "$OPEN_WEBUI_LOG" "$OPEN_WEBUI_BIN" serve --host "$WEBUI_HOST" --port "$WEBUI_PORT"
+  )"
+  printf '%s\n' "$pid" >"$WEBUI_PID_FILE"
+
+  if ! wait_for_ok "${WEBUI_BASE_URL}/health" 180 >/dev/null; then
+    tail_log "$OPEN_WEBUI_LOG"
+    die "$LAST_WAIT_ERROR"
+  fi
+}
+
+sign_in_open_webui() {
+  local response
+  if ! response="$(wait_for_ok "${WEBUI_BASE_URL}/api/v1/auths/signin" 60 POST '{"email":"admin@localhost","password":"admin"}')"; then
+    tail_log "$OPEN_WEBUI_LOG"
+    die "$LAST_WAIT_ERROR"
+  fi
+  RESPONSE_JSON="$response" "$VENV_PY" - <<'PY'
+import json
+import os
+import sys
+
+payload = json.loads(os.environ["RESPONSE_JSON"])
+token = payload.get("token")
+if not isinstance(token, str) or not token:
+    print("Open WebUI signin did not return a token.", file=sys.stderr)
+    raise SystemExit(1)
+print(token)
+PY
+}
+
+collection_name="$("$VENV_PY" - <<'PY'
+from agentic_rag.settings import AgenticRagSettings
+
+print(AgenticRagSettings().collection_name)
+PY
+)"
+
+function_payload="$(PIPE_PATH="$PIPE_PATH" "$VENV_PY" - <<'PY'
+import json
+import os
+from pathlib import Path
+
+content = Path(os.environ["PIPE_PATH"]).read_text(encoding="utf-8")
+payload = {
+    "id": "agentic_rag_pipe",
+    "name": "Agentic RAG Pipe",
+    "content": content,
+    "meta": {
+        "description": "Standalone Pipe manifold for the local Agentic RAG API.",
+    },
+}
+print(json.dumps(payload))
+PY
+)"
+
+ensure_api_running
+ensure_open_webui_running
+
+token="$(sign_in_open_webui)"
+functions_json="$(request_json GET "${WEBUI_BASE_URL}/api/v1/functions/list" "" "$token")"
+function_exists="$(FUNCTIONS_JSON="$functions_json" "$VENV_PY" - <<'PY'
+import json
+import os
+
+functions = json.loads(os.environ["FUNCTIONS_JSON"] or "[]")
+exists = any(isinstance(item, dict) and item.get("id") == "agentic_rag_pipe" for item in functions)
+print("1" if exists else "0")
+PY
+)"
+
+if [[ "$function_exists" == "1" ]]; then
+  request_json POST "${WEBUI_BASE_URL}/api/v1/functions/id/agentic_rag_pipe/update" "$function_payload" "$token" >/dev/null
+else
+  request_json POST "${WEBUI_BASE_URL}/api/v1/functions/create" "$function_payload" "$token" >/dev/null
+fi
+
+function_state_json="$(request_json GET "${WEBUI_BASE_URL}/api/v1/functions/id/agentic_rag_pipe" "" "$token")"
+function_active="$(FUNCTION_STATE_JSON="$function_state_json" "$VENV_PY" - <<'PY'
+import json
+import os
+
+state = json.loads(os.environ["FUNCTION_STATE_JSON"] or "{}")
+print("1" if state.get("is_active") else "0")
+PY
+)"
+function_global="$(FUNCTION_STATE_JSON="$function_state_json" "$VENV_PY" - <<'PY'
+import json
+import os
+
+state = json.loads(os.environ["FUNCTION_STATE_JSON"] or "{}")
+print("1" if state.get("is_global") else "0")
+PY
+)"
+
+if [[ "$function_active" != "1" ]]; then
+  request_json POST "${WEBUI_BASE_URL}/api/v1/functions/id/agentic_rag_pipe/toggle" "" "$token" >/dev/null
+fi
+if [[ "$function_global" != "1" ]]; then
+  request_json POST "${WEBUI_BASE_URL}/api/v1/functions/id/agentic_rag_pipe/toggle/global" "" "$token" >/dev/null
+fi
+
+valves_payload="$(API_BASE_URL="$API_BASE_URL" COLLECTION_NAME="$collection_name" "$VENV_PY" - <<'PY'
+import json
+import os
+
+collection_name = os.environ["COLLECTION_NAME"]
+payload = {
+    "API_BASE_URL": os.environ["API_BASE_URL"],
+    "DEFAULT_COLLECTION_NAME": collection_name,
+    "COLLECTIONS": f"{collection_name}=Knowledge Base",
+    "MODEL_NAME_PREFIX": "Agentic RAG",
+    "SHOW_STATUS": True,
+    "SHOW_METADATA_FOOTER": False,
+}
+print(json.dumps(payload))
+PY
+)"
+request_json POST "${WEBUI_BASE_URL}/api/v1/functions/id/agentic_rag_pipe/valves/update" "$valves_payload" "$token" >/dev/null
+
+model_id="agentic_rag_pipe.agentic-rag.${collection_name}"
+models_json="$(request_json GET "${WEBUI_BASE_URL}/api/models" "" "$token")"
+model_exists="$(MODELS_JSON="$models_json" MODEL_ID="$model_id" "$VENV_PY" - <<'PY'
+import json
+import os
+
+payload = json.loads(os.environ["MODELS_JSON"] or "[]")
+models = payload["data"] if isinstance(payload, dict) and isinstance(payload.get("data"), list) else payload
+exists = any(isinstance(item, dict) and item.get("id") == os.environ["MODEL_ID"] for item in models)
+print("1" if exists else "0")
+PY
+)"
+
+if [[ "$model_exists" != "1" ]]; then
+  tail_log "$OPEN_WEBUI_LOG"
+  die "Open WebUI model '${model_id}' was not registered."
+fi
+
+if [[ "$OPEN_BROWSER" == "1" ]] && command -v open >/dev/null 2>&1; then
+  open "$WEBUI_BASE_URL" >/dev/null 2>&1 || true
+fi
+
+echo "Open WebUI: ${WEBUI_BASE_URL}"
+echo "Modelo: ${model_id}"
+echo "Autenticacion: deshabilitada para este runtime local."
+echo "Logs: ${LOGS_DIR}"

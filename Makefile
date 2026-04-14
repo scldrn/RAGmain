@@ -1,11 +1,18 @@
 .PHONY: install-dev lint format-check typecheck test eval-baseline eval-hybrid eval-compare check
 
 VENV ?= .venv
+
+ifneq ($(wildcard $(VENV)/bin/python),)
 PYTHON ?= $(VENV)/bin/python
 PIP ?= $(VENV)/bin/pip
-RUFF ?= $(VENV)/bin/ruff
-MYPY ?= $(VENV)/bin/mypy
-PYTEST ?= $(VENV)/bin/pytest
+else
+PYTHON ?= python
+PIP ?= $(PYTHON) -m pip
+endif
+
+RUFF ?= $(PYTHON) -m ruff
+MYPY ?= $(PYTHON) -m mypy
+PYTEST ?= $(PYTHON) -m pytest
 
 install-dev:
 	$(PIP) install -e '.[dev]'

@@ -15,6 +15,20 @@ DEFAULT_SOURCE_URLS: Tuple[str, ...] = (
     "https://lilianweng.github.io/posts/2024-07-07-hallucination/",
     "https://lilianweng.github.io/posts/2024-04-12-diffusion-video/",
 )
+DEFAULT_CHAT_PROVIDER = "google"
+DEFAULT_INGESTION_MODE = "auto"
+DEFAULT_RETRIEVAL_MODE = "dense"
+DEFAULT_CHUNK_SIZE = 1200
+DEFAULT_CHUNK_OVERLAP = 200
+DEFAULT_RETRIEVAL_K = 6
+DEFAULT_CHAT_TEMPERATURE = 0.0
+DEFAULT_CHAT_MAX_TOKENS: int | None = None
+DEFAULT_INDEX_CACHE_DIR = ".cache/vectorstores"
+DEFAULT_COLLECTION_NAME = "documents"
+DEFAULT_CORS_ALLOW_ORIGINS: Tuple[str, ...] = ()
+DEFAULT_MAX_REWRITES = 3
+DEFAULT_FETCH_TIMEOUT_SECONDS = 20.0
+DEFAULT_MODEL_TIMEOUT_SECONDS = 60.0
 
 SUPPORTED_CHAT_PROVIDERS: Tuple[str, ...] = (
     "google",
@@ -69,9 +83,20 @@ def _clean_optional_str(value: Optional[str]) -> Optional[str]:
     return normalized or None
 
 
-def _read_float_env(*names: str, default: float) -> float:
+def _read_optional_env(*names: str) -> Optional[str]:
     raw_value = next((os.getenv(name) for name in names if os.getenv(name) is not None), None)
-    normalized = _clean_optional_str(raw_value)
+    return _clean_optional_str(raw_value)
+
+
+def _read_csv_env(*names: str) -> Tuple[str, ...]:
+    raw_value = _read_optional_env(*names)
+    if raw_value is None:
+        return ()
+    return tuple(part.strip() for part in raw_value.split(",") if part.strip())
+
+
+def _read_float_env(*names: str, default: float) -> float:
+    normalized = _read_optional_env(*names)
     if normalized is None:
         return default
 
@@ -83,10 +108,21 @@ def _read_float_env(*names: str, default: float) -> float:
 
 
 def _read_int_env(*names: str, default: int) -> int:
-    raw_value = next((os.getenv(name) for name in names if os.getenv(name) is not None), None)
-    normalized = _clean_optional_str(raw_value)
+    normalized = _read_optional_env(*names)
     if normalized is None:
         return default
+
+    try:
+        return int(normalized)
+    except ValueError as exc:
+        joined_names = ", ".join(names)
+        raise ConfigurationError(f"{joined_names} must be a valid integer value.") from exc
+
+
+def _read_optional_int_env(*names: str) -> int | None:
+    normalized = _read_optional_env(*names)
+    if normalized is None:
+        return None
 
     try:
         return int(normalized)
@@ -106,24 +142,20 @@ def normalize_provider_name(provider: Optional[str]) -> Optional[str]:
 
 def default_chat_provider() -> str:
     """Read the configured chat provider from the environment."""
-    provider = _clean_optional_str(os.getenv("CHAT_PROVIDER", os.getenv("LLM_PROVIDER")))
-    return normalize_provider_name(provider) or "google"
+    return normalize_provider_name(_read_optional_env("CHAT_PROVIDER", "LLM_PROVIDER")) or (
+        DEFAULT_CHAT_PROVIDER
+    )
 
 
 def default_chat_model() -> str:
     """Read the configured chat model from the environment."""
     provider = default_chat_provider()
-    return (
-        _clean_optional_str(
-            os.getenv("CHAT_MODEL", os.getenv("LLM_MODEL", DEFAULT_CHAT_MODELS.get(provider, "")))
-        )
-        or ""
-    )
+    return _read_optional_env("CHAT_MODEL", "LLM_MODEL") or DEFAULT_CHAT_MODELS.get(provider, "")
 
 
 def default_embedding_provider() -> Optional[str]:
     """Read the configured embedding provider from the environment."""
-    explicit_provider = _clean_optional_str(os.getenv("EMBEDDING_PROVIDER"))
+    explicit_provider = _read_optional_env("EMBEDDING_PROVIDER")
     if explicit_provider:
         return normalize_provider_name(explicit_provider)
 
@@ -140,63 +172,122 @@ def default_embedding_model() -> Optional[str]:
     if provider is None:
         return None
 
-    return _clean_optional_str(os.getenv("EMBEDDING_MODEL", DEFAULT_EMBEDDING_MODELS.get(provider)))
+    return _read_optional_env("EMBEDDING_MODEL") or DEFAULT_EMBEDDING_MODELS.get(provider)
 
 
 def default_ingestion_mode() -> str:
     """Read the configured ingestion mode from the environment."""
-    return (_clean_optional_str(os.getenv("INGESTION_MODE")) or "auto").lower()
+    return (_read_optional_env("INGESTION_MODE") or DEFAULT_INGESTION_MODE).lower()
 
 
 def default_retrieval_mode() -> str:
     """Read the configured retrieval mode from the environment."""
-    return (_clean_optional_str(os.getenv("RETRIEVAL_MODE")) or "dense").lower()
+    return (_read_optional_env("RETRIEVAL_MODE") or DEFAULT_RETRIEVAL_MODE).lower()
+
+
+def _normalize_mode_setting(
+    value: Optional[str],
+    *,
+    default: str,
+    supported: Tuple[str, ...],
+    field_name: str,
+) -> str:
+    normalized = (_clean_optional_str(value) or default).lower()
+    if normalized not in supported:
+        raise ConfigurationError(
+            f"Unsupported {field_name} '{value}'. Supported values: {', '.join(supported)}."
+        )
+    return normalized
+
+
+def _normalized_source_urls(source_urls: Sequence[str]) -> Tuple[str, ...]:
+    return tuple(url.strip() for url in source_urls if url and url.strip())
+
+
+def _normalized_values(values: Sequence[str]) -> Tuple[str, ...]:
+    return tuple(value.strip() for value in values if value and value.strip())
+
+
+def _resolve_model_name(
+    value: Optional[str],
+    *,
+    provider: str,
+    defaults: dict[str, str],
+    field_name: str,
+) -> str:
+    resolved = _clean_optional_str(value) or defaults.get(provider)
+    if not resolved:
+        raise ConfigurationError(f"{field_name} must be a non-empty string.")
+    return resolved
 
 
 @dataclass(frozen=True)
 class AgenticRagSettings:
     source_urls: Sequence[str] = field(default_factory=lambda: DEFAULT_SOURCE_URLS)
-    chunk_size: int = 1200
-    chunk_overlap: int = 200
-    retrieval_k: int = 6
+    chunk_size: int = DEFAULT_CHUNK_SIZE
+    chunk_overlap: int = DEFAULT_CHUNK_OVERLAP
+    retrieval_k: int = DEFAULT_RETRIEVAL_K
     chat_provider: str = field(default_factory=default_chat_provider)
     chat_model: str = field(default_factory=default_chat_model)
     chat_api_key: Optional[str] = field(
-        default_factory=lambda: os.getenv("CHAT_API_KEY", os.getenv("LLM_API_KEY"))
+        default_factory=lambda: _read_optional_env("CHAT_API_KEY", "LLM_API_KEY")
     )
     chat_api_key_env: Optional[str] = field(
-        default_factory=lambda: os.getenv("CHAT_API_KEY_ENV", os.getenv("LLM_API_KEY_ENV"))
+        default_factory=lambda: _read_optional_env("CHAT_API_KEY_ENV", "LLM_API_KEY_ENV")
     )
     chat_api_base: Optional[str] = field(
-        default_factory=lambda: os.getenv("CHAT_API_BASE", os.getenv("LLM_API_BASE"))
+        default_factory=lambda: _read_optional_env("CHAT_API_BASE", "LLM_API_BASE")
     )
     chat_temperature: float = field(
-        default_factory=lambda: _read_float_env("CHAT_TEMPERATURE", "LLM_TEMPERATURE", default=0.0)
+        default_factory=lambda: _read_float_env(
+            "CHAT_TEMPERATURE",
+            "LLM_TEMPERATURE",
+            default=DEFAULT_CHAT_TEMPERATURE,
+        )
+    )
+    chat_max_tokens: int | None = field(
+        default_factory=lambda: _read_optional_int_env("CHAT_MAX_TOKENS")
     )
     embedding_provider: Optional[str] = field(default_factory=default_embedding_provider)
     embedding_model: Optional[str] = field(default_factory=default_embedding_model)
-    embedding_api_key: Optional[str] = field(default_factory=lambda: os.getenv("EMBEDDING_API_KEY"))
+    embedding_api_key: Optional[str] = field(
+        default_factory=lambda: _read_optional_env("EMBEDDING_API_KEY")
+    )
     embedding_api_key_env: Optional[str] = field(
-        default_factory=lambda: os.getenv("EMBEDDING_API_KEY_ENV")
+        default_factory=lambda: _read_optional_env("EMBEDDING_API_KEY_ENV")
     )
     embedding_api_base: Optional[str] = field(
-        default_factory=lambda: os.getenv("EMBEDDING_API_BASE")
+        default_factory=lambda: _read_optional_env("EMBEDDING_API_BASE")
     )
     index_cache_dir: str = field(
-        default_factory=lambda: os.getenv("INDEX_CACHE_DIR", ".cache/vectorstores")
+        default_factory=lambda: _read_optional_env("INDEX_CACHE_DIR") or DEFAULT_INDEX_CACHE_DIR
+    )
+    collection_name: str = field(
+        default_factory=lambda: _read_optional_env("COLLECTION_NAME") or DEFAULT_COLLECTION_NAME
+    )
+    cors_allow_origins: Sequence[str] = field(
+        default_factory=lambda: _read_csv_env("CORS_ALLOW_ORIGINS", "API_CORS_ALLOW_ORIGINS")
     )
     ingestion_mode: str = field(default_factory=default_ingestion_mode)
     retrieval_mode: str = field(default_factory=default_retrieval_mode)
-    max_rewrites: int = field(default_factory=lambda: _read_int_env("MAX_REWRITES", default=3))
+    max_rewrites: int = field(
+        default_factory=lambda: _read_int_env("MAX_REWRITES", default=DEFAULT_MAX_REWRITES)
+    )
     fetch_timeout_seconds: float = field(
-        default_factory=lambda: _read_float_env("FETCH_TIMEOUT_SECONDS", default=20.0)
+        default_factory=lambda: _read_float_env(
+            "FETCH_TIMEOUT_SECONDS",
+            default=DEFAULT_FETCH_TIMEOUT_SECONDS,
+        )
     )
     model_timeout_seconds: float = field(
-        default_factory=lambda: _read_float_env("MODEL_TIMEOUT_SECONDS", default=60.0)
+        default_factory=lambda: _read_float_env(
+            "MODEL_TIMEOUT_SECONDS",
+            default=DEFAULT_MODEL_TIMEOUT_SECONDS,
+        )
     )
 
     def __post_init__(self) -> None:
-        normalized_urls = tuple(url.strip() for url in self.source_urls if url and url.strip())
+        normalized_urls = _normalized_source_urls(self.source_urls)
         if not normalized_urls:
             raise ConfigurationError("source_urls must contain at least one non-empty URL.")
 
@@ -220,29 +311,31 @@ class AgenticRagSettings:
                 f"{', '.join(SUPPORTED_EMBEDDING_PROVIDERS)}."
             )
 
-        chat_model = _clean_optional_str(self.chat_model) or DEFAULT_CHAT_MODELS.get(chat_provider)
-        if not chat_model:
-            raise ConfigurationError("chat_model must be a non-empty string.")
-
-        embedding_model = _clean_optional_str(self.embedding_model) or DEFAULT_EMBEDDING_MODELS.get(
-            embedding_provider
+        chat_model = _resolve_model_name(
+            self.chat_model,
+            provider=chat_provider,
+            defaults=DEFAULT_CHAT_MODELS,
+            field_name="chat_model",
         )
-        if not embedding_model:
-            raise ConfigurationError("embedding_model must be a non-empty string.")
+        embedding_model = _resolve_model_name(
+            self.embedding_model,
+            provider=embedding_provider,
+            defaults=DEFAULT_EMBEDDING_MODELS,
+            field_name="embedding_model",
+        )
 
-        ingestion_mode = (_clean_optional_str(self.ingestion_mode) or "auto").lower()
-        if ingestion_mode not in SUPPORTED_INGESTION_MODES:
-            raise ConfigurationError(
-                f"Unsupported ingestion_mode '{self.ingestion_mode}'. Supported values: "
-                f"{', '.join(SUPPORTED_INGESTION_MODES)}."
-            )
-
-        retrieval_mode = (_clean_optional_str(self.retrieval_mode) or "dense").lower()
-        if retrieval_mode not in SUPPORTED_RETRIEVAL_MODES:
-            raise ConfigurationError(
-                f"Unsupported retrieval_mode '{self.retrieval_mode}'. Supported values: "
-                f"{', '.join(SUPPORTED_RETRIEVAL_MODES)}."
-            )
+        ingestion_mode = _normalize_mode_setting(
+            self.ingestion_mode,
+            default=DEFAULT_INGESTION_MODE,
+            supported=SUPPORTED_INGESTION_MODES,
+            field_name="ingestion_mode",
+        )
+        retrieval_mode = _normalize_mode_setting(
+            self.retrieval_mode,
+            default=DEFAULT_RETRIEVAL_MODE,
+            supported=SUPPORTED_RETRIEVAL_MODES,
+            field_name="retrieval_mode",
+        )
 
         chat_api_base = _clean_optional_str(self.chat_api_base)
         embedding_api_base = _clean_optional_str(self.embedding_api_base)
@@ -260,12 +353,18 @@ class AgenticRagSettings:
             raise ConfigurationError("retrieval_k must be greater than zero.")
         if not 0 <= self.chat_temperature <= 2:
             raise ConfigurationError("chat_temperature must be between 0 and 2.")
+        if self.chat_max_tokens is not None and self.chat_max_tokens <= 0:
+            raise ConfigurationError("chat_max_tokens must be greater than zero.")
         if self.max_rewrites <= 0:
             raise ConfigurationError("max_rewrites must be greater than zero.")
         if self.fetch_timeout_seconds <= 0:
             raise ConfigurationError("fetch_timeout_seconds must be greater than zero.")
         if self.model_timeout_seconds <= 0:
             raise ConfigurationError("model_timeout_seconds must be greater than zero.")
+        collection_name = _clean_optional_str(self.collection_name)
+        if not collection_name:
+            raise ConfigurationError("collection_name must be a non-empty string.")
+        cors_allow_origins = _normalized_values(self.cors_allow_origins)
         if chat_provider == "openai-compatible" and not chat_api_base:
             raise ConfigurationError(
                 "The 'openai-compatible' chat provider requires CHAT_API_BASE or --chat-api-base."
@@ -282,6 +381,7 @@ class AgenticRagSettings:
         object.__setattr__(self, "chat_api_key", _clean_optional_str(self.chat_api_key))
         object.__setattr__(self, "chat_api_key_env", _clean_optional_str(self.chat_api_key_env))
         object.__setattr__(self, "chat_api_base", chat_api_base)
+        object.__setattr__(self, "chat_max_tokens", self.chat_max_tokens)
         object.__setattr__(self, "embedding_provider", embedding_provider)
         object.__setattr__(self, "embedding_model", embedding_model)
         object.__setattr__(self, "embedding_api_key", _clean_optional_str(self.embedding_api_key))
@@ -292,7 +392,9 @@ class AgenticRagSettings:
         object.__setattr__(
             self,
             "index_cache_dir",
-            _clean_optional_str(self.index_cache_dir) or ".cache/vectorstores",
+            _clean_optional_str(self.index_cache_dir) or DEFAULT_INDEX_CACHE_DIR,
         )
+        object.__setattr__(self, "collection_name", collection_name)
+        object.__setattr__(self, "cors_allow_origins", cors_allow_origins)
         object.__setattr__(self, "ingestion_mode", ingestion_mode)
         object.__setattr__(self, "retrieval_mode", retrieval_mode)

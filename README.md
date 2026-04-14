@@ -14,8 +14,11 @@ This project indexes a set of source documents, persists a local Qdrant vector i
 - Deterministic reranking, deduplication, and context trimming
 - Persistent local Qdrant index in `.cache/vectorstores`
 - CLI with step-by-step execution tracing
+- FastAPI runtime over the shared service layer
+- Open WebUI integration through an external Pipe adapter
 - Source-aware answers with citations
 - Offline evaluation harness with checked-in baselines
+- Multi-collection support through `collection_name`
 - Full local quality gate with 100% test coverage
 
 ## Supported Providers
@@ -42,10 +45,14 @@ git clone git@github.com:scldrn/RAGmain.git
 cd RAGmain
 /opt/homebrew/bin/python3.11 -m venv .venv
 source .venv/bin/activate
-pip install -e '.[dev]'
+make install-dev
+cp .env.example .env
+pre-commit install
 ```
 
 Python `3.10+` is required. Python `3.11` is the preferred local baseline.
+The commands below assume the virtualenv is activated. If it is not, prefer the `make` targets or
+run `.venv/bin/python -m ...`.
 
 Create a `.env` file with your provider config. Minimal Google AI Studio example:
 
@@ -55,8 +62,10 @@ CHAT_MODEL=gemini-2.5-flash
 EMBEDDING_PROVIDER=google
 EMBEDDING_MODEL=gemini-embedding-2-preview
 INDEX_CACHE_DIR=.cache/vectorstores
+COLLECTION_NAME=documents
 INGESTION_MODE=auto
 FETCH_TIMEOUT_SECONDS=20
+CORS_ALLOW_ORIGINS=http://localhost:3000,http://127.0.0.1:5173
 GOOGLE_API_KEY=your_api_key
 ```
 
@@ -94,6 +103,18 @@ python -m agentic_rag \
   --question "What does Lilian Weng say about reward hacking?"
 ```
 
+Run the API server:
+
+```bash
+agentic-rag-api
+```
+
+Or run it explicitly with Uvicorn:
+
+```bash
+python -m uvicorn agentic_rag.api:create_api_app --factory --reload
+```
+
 ## Provider Examples
 
 OpenAI:
@@ -123,6 +144,7 @@ OpenAI-compatible local endpoint:
 CHAT_PROVIDER=openai-compatible
 CHAT_MODEL=local-model-name
 CHAT_API_BASE=http://localhost:1234/v1
+CHAT_MAX_TOKENS=2048
 CHAT_API_KEY=lm-studio
 EMBEDDING_PROVIDER=openai-compatible
 EMBEDDING_MODEL=text-embedding-3-small
@@ -152,6 +174,113 @@ Show full help:
 
 ```bash
 python -m agentic_rag --help
+```
+
+## API Runtime
+
+The FastAPI app is a thin wrapper around `AgenticRagService`, so the HTTP surface reuses the same
+ingestion, query, health, and index lifecycle as the CLI.
+
+Endpoints:
+
+- `POST /query`
+- `POST /ingest`
+- `GET /health`
+- `GET /index/status`
+
+`POST /query` returns a structured payload with:
+
+- nullable `answer`
+- final `message`
+- `termination_reason`
+- `rewrites_used`
+- `index_status`
+- structured `trace.steps`
+- per-request `metrics`
+
+The API supports multi-collection operation through `collection_name`. You can pass it in the
+request body for `POST` endpoints or as a query parameter for `GET` endpoints. Different
+collections keep separate cache fingerprints and index state.
+
+For browser-based clients, CORS is opt-in. Set `CORS_ALLOW_ORIGINS` to a comma-separated list of
+allowed origins. Example:
+
+```env
+CORS_ALLOW_ORIGINS=http://localhost:3000,http://127.0.0.1:5173
+```
+
+Example query:
+
+```bash
+curl -X POST http://127.0.0.1:8000/query \
+  -H 'Content-Type: application/json' \
+  -d '{
+    "question": "What is reward hacking?",
+    "collection_name": "research-notes"
+  }'
+```
+
+Example ingest using the default collection:
+
+```bash
+curl -X POST http://127.0.0.1:8000/ingest
+```
+
+Example ingest for a named collection:
+
+```bash
+curl -X POST http://127.0.0.1:8000/ingest \
+  -H 'Content-Type: application/json' \
+  -d '{
+    "collection_name": "research-notes"
+  }'
+```
+
+Health check:
+
+```bash
+curl 'http://127.0.0.1:8000/health?collection_name=research-notes'
+```
+
+Index status:
+
+```bash
+curl 'http://127.0.0.1:8000/index/status?collection_name=research-notes'
+```
+
+## Open WebUI Integration
+
+Open WebUI support is implemented as an external adapter, not as a dependency of the core package.
+The backend remains a standalone CLI/API service, and Open WebUI connects to it through
+[`integrations/open_webui/agentic_rag_pipe.py`](integrations/open_webui/agentic_rag_pipe.py).
+
+That means you can remove Open WebUI later without undoing application logic or changing
+`src/agentic_rag/`.
+
+See [`docs/open-webui.md`](docs/open-webui.md) for import steps, valve configuration, and
+multi-collection setup inside Open WebUI.
+
+For a fully local one-command launcher, run:
+
+```bash
+./scripts/isabella
+```
+
+That script starts the Agentic RAG API, boots an isolated Open WebUI runtime, registers the Pipe
+automatically, and exposes the UI on `http://127.0.0.1:8081` with login disabled for that local
+runtime. Use `./scripts/isabella --no-browser`, `./scripts/isabella --webui-port 8090`, or
+`./scripts/isabella --runtime-dir /custom/path` if you want to adjust the local setup.
+
+To stop services previously started by Isabella for the same runtime directory:
+
+```bash
+./scripts/isabella-stop
+```
+
+Or point it at a specific runtime:
+
+```bash
+./scripts/isabella-stop --runtime-dir /custom/path
 ```
 
 ## How It Works
@@ -187,10 +316,19 @@ python -m agentic_rag \
 
 ## Development
 
-Run the local quality gates:
+Run the canonical local quality gate:
 
 ```bash
 make check
+```
+
+Run the individual targets that the GitHub Actions workflow executes:
+
+```bash
+make lint
+make format-check
+make typecheck
+make test
 ```
 
 Run the offline Phase 2 dense baseline:
@@ -214,17 +352,20 @@ make eval-compare
 Equivalent individual commands:
 
 ```bash
-ruff check .
-ruff format --check .
-mypy src/agentic_rag
-pytest --cov=src/agentic_rag --cov-report=term-missing --cov-fail-under=85
+python -m ruff check .
+python -m ruff format --check .
+python -m mypy src/agentic_rag
+python -m pytest --cov=src/agentic_rag --cov-report=term-missing --cov-fail-under=85
 ```
 
 The Phase 2 starter corpus and checked-in dense/hybrid baselines live under `tests/eval/`. The harness is implemented in `src/agentic_rag/evaluation.py` and runs without external APIs so retrieval changes can be compared locally before promoting them.
+GitHub Actions runs the same lint, format, type-check, and test targets on Python `3.10` and
+`3.11`, creating `.venv` inside the runner before calling `make`.
 
 Main files:
 
 - `src/agentic_rag/service.py`
+- `src/agentic_rag/api.py`
 - `src/agentic_rag/retrieval.py`
 - `src/agentic_rag/evaluation.py`
 - `src/agentic_rag/presentation.py`
@@ -247,6 +388,7 @@ Main files:
 - Corrupted or incomplete Qdrant cache directories are detected and rebuilt automatically.
 - Document fetches use per-request timeouts, retry each URL, and continue indexing with the remaining sources when only some URLs fail.
 - `MODEL_TIMEOUT_SECONDS` applies to provider clients, and transient chat/embedding failures retry with exponential backoff before surfacing a typed error.
+- `CHAT_MAX_TOKENS` lets you cap completion size for chat providers; this is useful with OpenRouter routes that otherwise default to a very large token budget.
 - Graph diagram export is static and does not require an existing index.
 - `--verbose` enables startup diagnostics and runtime logging for command, providers, cache path, index state, and final query outcome.
 - The first run for a new source/config combination builds embeddings and writes a local Qdrant index.

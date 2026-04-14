@@ -9,6 +9,7 @@ description = "Agentic RAG project built with LangGraph and LangChain."
 requires-python = ">=3.10"
 dependencies = [
   "beautifulsoup4>=4.12.0",
+  "fastapi>=0.115.0,<1.0.0",
   "langchain>=0.3.0,<1.0.0",
   "langchain-anthropic>=0.3.0,<1.0.0",
   "langchain-community>=0.3.0,<1.0.0",
@@ -21,6 +22,7 @@ dependencies = [
   "python-dotenv>=1.0.0,<2.0.0",
   "qdrant-client>=1.10.1,<2.0.0",
   "urllib3<2",
+  "uvicorn>=0.30.0,<1.0.0",
 ]
 
 [project.optional-dependencies]
@@ -34,6 +36,7 @@ dev = [
 
 [project.scripts]
 agentic-rag = "agentic_rag.cli:main"
+agentic-rag-api = "agentic_rag.api:run"
 
 [tool.setuptools.packages.find]
 where = ["src"]

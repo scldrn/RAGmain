@@ -1,0 +1,109 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+usage() {
+  cat <<'EOF'
+Usage: ./scripts/isabella-stop [options]
+
+Options:
+  --runtime-dir PATH     Runtime directory (default: ~/.agentic-rag/isabella)
+  -h, --help             Show this help
+EOF
+}
+
+RUNTIME_DIR="${ISABELLA_RUNTIME_DIR:-$HOME/.agentic-rag/isabella}"
+
+while (($# > 0)); do
+  case "$1" in
+    --runtime-dir)
+      RUNTIME_DIR="$2"
+      shift 2
+      ;;
+    -h|--help)
+      usage
+      exit 0
+      ;;
+    *)
+      echo "Unknown option: $1" >&2
+      usage >&2
+      exit 1
+      ;;
+  esac
+done
+
+stop_service() {
+  local label="$1"
+  local pid_file="$2"
+
+  if [[ ! -f "$pid_file" ]]; then
+    echo "${label}: not-tracked"
+    return
+  fi
+
+  local pid
+  pid="$(tr -d '[:space:]' <"$pid_file" || true)"
+  if [[ -z "$pid" ]] || ! kill -0 "$pid" 2>/dev/null; then
+    rm -f "$pid_file"
+    echo "${label}: stale"
+    return
+  fi
+
+  if ! python3 - "$pid" <<'PY'
+import os
+import signal
+import sys
+import time
+
+pid = int(sys.argv[1])
+
+try:
+    process_group = os.getpgid(pid)
+except ProcessLookupError:
+    raise SystemExit(0)
+
+try:
+    os.killpg(process_group, signal.SIGTERM)
+except ProcessLookupError:
+    raise SystemExit(0)
+
+deadline = time.time() + 10.0
+while time.time() < deadline:
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        raise SystemExit(0)
+    except PermissionError:
+        time.sleep(0.1)
+        continue
+    time.sleep(0.1)
+
+try:
+    os.killpg(process_group, signal.SIGKILL)
+except ProcessLookupError:
+    raise SystemExit(0)
+
+deadline = time.time() + 2.0
+while time.time() < deadline:
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        raise SystemExit(0)
+    except PermissionError:
+        time.sleep(0.1)
+        continue
+    time.sleep(0.1)
+
+raise SystemExit(1)
+PY
+  then
+    echo "${label}: failed" >&2
+    exit 1
+  fi
+
+  rm -f "$pid_file"
+  echo "${label}: stopped"
+}
+
+stop_service "Open WebUI" "${RUNTIME_DIR}/open-webui.pid"
+stop_service "Agentic RAG API" "${RUNTIME_DIR}/agentic-rag-api.pid"
+echo "Runtime: ${RUNTIME_DIR}"

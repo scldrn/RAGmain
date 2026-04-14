@@ -46,6 +46,7 @@ Context:
 {context}
 """.strip()
 
+NO_RELEVANT_DOCUMENTS_MESSAGE = "No relevant documents were found."
 INSUFFICIENT_CONTEXT_REASON = "insufficient_context"
 INSUFFICIENT_CONTEXT_MESSAGE = (
     "I do not have enough relevant context to answer reliably after the allowed retrieval attempts."
@@ -76,7 +77,7 @@ class ChatModelLike(Protocol):
 
 
 def _context_has_no_relevant_documents(context: str) -> bool:
-    return context.strip() == "No relevant documents were found."
+    return context.strip() == NO_RELEVANT_DOCUMENTS_MESSAGE
 
 
 def message_text(message: BaseMessage) -> str:
@@ -102,7 +103,7 @@ def message_text(message: BaseMessage) -> str:
 def format_retrieved_documents(documents: Sequence[Document]) -> str:
     """Serialize retrieved documents into a readable tool response."""
     if not documents:
-        return "No relevant documents were found."
+        return NO_RELEVANT_DOCUMENTS_MESSAGE
 
     sections = []
     for index, document in enumerate(documents, start=1):
@@ -210,7 +211,7 @@ def make_grade_documents(
         question = current_retrieval_query(state)
         context = message_text(state["messages"][-1])
         if _context_has_no_relevant_documents(context):
-            if rewrite_count(state) >= max_rewrites or rewrite_stalled(state):
+            if _should_stop_after_failed_retrieval(state, max_rewrites=max_rewrites):
                 return "insufficient_context"
             return "rewrite_question"
         prompt = RELEVANCE_PROMPT.format(question=question, context=context)
@@ -220,7 +221,7 @@ def make_grade_documents(
 
         if response.binary_score == "yes":
             return "generate_answer"
-        if rewrite_count(state) >= max_rewrites or rewrite_stalled(state):
+        if _should_stop_after_failed_retrieval(state, max_rewrites=max_rewrites):
             return "insufficient_context"
         return "rewrite_question"
 
@@ -253,6 +254,14 @@ def route_after_rewrite(
     if rewrite_stalled(state):
         return "insufficient_context"
     return "prepare_retrieval"
+
+
+def _should_stop_after_failed_retrieval(
+    state: AgenticRagState,
+    *,
+    max_rewrites: int,
+) -> bool:
+    return rewrite_count(state) >= max_rewrites or rewrite_stalled(state)
 
 
 def _parse_grade_documents_response(message: BaseMessage) -> GradeDocuments:

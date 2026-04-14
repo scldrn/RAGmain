@@ -13,13 +13,23 @@ from agentic_rag.presentation import format_index_status, format_query_step
 from agentic_rag.service import AgenticRagService, HealthStatus, IndexStatus, QueryStep
 from agentic_rag.settings import (
     DEFAULT_CHAT_MODELS,
+    DEFAULT_CHAT_TEMPERATURE,
+    DEFAULT_CHUNK_OVERLAP,
+    DEFAULT_CHUNK_SIZE,
     DEFAULT_EMBEDDING_MODELS,
+    DEFAULT_FETCH_TIMEOUT_SECONDS,
+    DEFAULT_INDEX_CACHE_DIR,
+    DEFAULT_MAX_REWRITES,
+    DEFAULT_MODEL_TIMEOUT_SECONDS,
+    DEFAULT_RETRIEVAL_K,
     DEFAULT_SOURCE_URLS,
     SUPPORTED_CHAT_PROVIDERS,
     SUPPORTED_EMBEDDING_PROVIDERS,
     AgenticRagSettings,
     _read_float_env,
     _read_int_env,
+    _read_optional_env,
+    _read_optional_int_env,
     default_chat_provider,
     default_ingestion_mode,
     default_retrieval_mode,
@@ -163,21 +173,13 @@ def build_parser() -> argparse.ArgumentParser:
         help="Optional output file for the Mermaid graph diagram.",
     )
 
-    ingest_parser = subparsers.add_parser("ingest", help="Build or refresh the local vector index.")
+    ingest_parser = subparsers.add_parser(
+        "ingest",
+        help="Build or refresh the local vector index.",
+    )
     add_shared_settings_arguments(ingest_parser)
 
     return parser
-
-
-def _read_optional_env(*names: str) -> str | None:
-    for name in names:
-        raw_value = os.getenv(name)
-        if raw_value is None:
-            continue
-        normalized = raw_value.strip()
-        if normalized:
-            return normalized
-    return None
 
 
 def _default_embedding_provider(chat_provider: str) -> str | None:
@@ -213,9 +215,9 @@ def build_settings(args: argparse.Namespace) -> AgenticRagSettings:
 
     return AgenticRagSettings(
         source_urls=tuple(source_urls or DEFAULT_SOURCE_URLS),
-        chunk_size=chunk_size if chunk_size is not None else 1200,
-        chunk_overlap=chunk_overlap if chunk_overlap is not None else 200,
-        retrieval_k=retrieval_k if retrieval_k is not None else 6,
+        chunk_size=chunk_size if chunk_size is not None else DEFAULT_CHUNK_SIZE,
+        chunk_overlap=chunk_overlap if chunk_overlap is not None else DEFAULT_CHUNK_OVERLAP,
+        retrieval_k=retrieval_k if retrieval_k is not None else DEFAULT_RETRIEVAL_K,
         chat_provider=chat_provider,
         chat_model=chat_model
         or _read_optional_env("CHAT_MODEL", "LLM_MODEL")
@@ -226,7 +228,12 @@ def build_settings(args: argparse.Namespace) -> AgenticRagSettings:
         chat_api_base=chat_api_base or _read_optional_env("CHAT_API_BASE", "LLM_API_BASE"),
         chat_temperature=chat_temperature
         if chat_temperature is not None
-        else _read_float_env("CHAT_TEMPERATURE", "LLM_TEMPERATURE", default=0.0),
+        else _read_float_env(
+            "CHAT_TEMPERATURE",
+            "LLM_TEMPERATURE",
+            default=DEFAULT_CHAT_TEMPERATURE,
+        ),
+        chat_max_tokens=_read_optional_int_env("CHAT_MAX_TOKENS"),
         embedding_provider=embedding_provider,
         embedding_model=embedding_model
         or _read_optional_env("EMBEDDING_MODEL")
@@ -234,12 +241,18 @@ def build_settings(args: argparse.Namespace) -> AgenticRagSettings:
         embedding_api_key=embedding_api_key or _read_optional_env("EMBEDDING_API_KEY"),
         embedding_api_key_env=embedding_api_key_env or _read_optional_env("EMBEDDING_API_KEY_ENV"),
         embedding_api_base=embedding_api_base or _read_optional_env("EMBEDDING_API_BASE"),
-        index_cache_dir=_read_optional_env("INDEX_CACHE_DIR") or ".cache/vectorstores",
+        index_cache_dir=_read_optional_env("INDEX_CACHE_DIR") or DEFAULT_INDEX_CACHE_DIR,
         ingestion_mode=default_ingestion_mode(),
         retrieval_mode=default_retrieval_mode(),
-        max_rewrites=_read_int_env("MAX_REWRITES", default=3),
-        fetch_timeout_seconds=_read_float_env("FETCH_TIMEOUT_SECONDS", default=20.0),
-        model_timeout_seconds=_read_float_env("MODEL_TIMEOUT_SECONDS", default=60.0),
+        max_rewrites=_read_int_env("MAX_REWRITES", default=DEFAULT_MAX_REWRITES),
+        fetch_timeout_seconds=_read_float_env(
+            "FETCH_TIMEOUT_SECONDS",
+            default=DEFAULT_FETCH_TIMEOUT_SECONDS,
+        ),
+        model_timeout_seconds=_read_float_env(
+            "MODEL_TIMEOUT_SECONDS",
+            default=DEFAULT_MODEL_TIMEOUT_SECONDS,
+        ),
     )
 
 

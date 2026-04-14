@@ -43,6 +43,7 @@ def test_google_chat_config_accepts_gemini_api_key(monkeypatch):
         chat_provider="google",
         chat_model="gemini-2.5-flash",
         chat_api_key_env=None,
+        chat_max_tokens=None,
         embedding_provider="google",
         embedding_model="gemini-embedding-2-preview",
     )
@@ -50,8 +51,27 @@ def test_google_chat_config_accepts_gemini_api_key(monkeypatch):
     config = resolve_chat_config(settings)
 
     assert config.api_key == "gemini-key"
+    assert config.max_tokens is None
     assert config.timeout_seconds == settings.model_timeout_seconds
     assert config.max_retries == 0
+
+
+def test_resolve_chat_config_includes_chat_max_tokens():
+    settings = AgenticRagSettings(
+        chat_provider="openai-compatible",
+        chat_model="local-chat-model",
+        chat_api_key="local-key",
+        chat_api_base="http://localhost:1234/v1",
+        chat_max_tokens=2048,
+        embedding_provider="openai-compatible",
+        embedding_model="local-embedding-model",
+        embedding_api_key="local-key",
+        embedding_api_base="http://localhost:1234/v1",
+    )
+
+    config = resolve_chat_config(settings)
+
+    assert config.max_tokens == 2048
 
 
 def test_openai_compatible_embedding_inherits_chat_credentials():
@@ -124,12 +144,13 @@ def test_create_chat_model_google():
     constructor = MagicMock(return_value=MagicMock())
     mock_google = MagicMock(ChatGoogleGenerativeAI=constructor)
     with _mock_modules(langchain_google_genai=mock_google):
-        config = _config("google", timeout_seconds=12.5, max_retries=0)
+        config = _config("google", timeout_seconds=12.5, max_retries=0, max_tokens=512)
         model = create_chat_model(config)
         assert model is not None
 
     constructor.assert_called_once()
     assert constructor.call_args.kwargs["timeout"] == 12.5
+    assert constructor.call_args.kwargs["max_output_tokens"] == 512
     assert constructor.call_args.kwargs["max_retries"] == 0
 
 
@@ -137,11 +158,12 @@ def test_create_chat_model_openai():
     constructor = MagicMock(return_value=MagicMock())
     mock_openai = MagicMock(ChatOpenAI=constructor)
     with _mock_modules(langchain_openai=mock_openai):
-        config = _config("openai", timeout_seconds=7.5, max_retries=0)
+        config = _config("openai", timeout_seconds=7.5, max_retries=0, max_tokens=1024)
         model = create_chat_model(config)
         assert model is not None
 
     constructor.assert_called_once()
+    assert constructor.call_args.kwargs["max_tokens"] == 1024
     assert constructor.call_args.kwargs["request_timeout"] == 7.5
     assert constructor.call_args.kwargs["max_retries"] == 0
 
@@ -160,19 +182,32 @@ def test_create_chat_model_openai_compatible():
 
 
 def test_create_chat_model_anthropic():
-    mock_anthropic = MagicMock(ChatAnthropic=MagicMock(return_value=MagicMock()))
+    constructor = MagicMock(return_value=MagicMock())
+    mock_anthropic = MagicMock(ChatAnthropic=constructor)
     with _mock_modules(langchain_anthropic=mock_anthropic):
-        config = _config("anthropic")
+        config = _config("anthropic", max_tokens=1536)
         model = create_chat_model(config)
         assert model is not None
+
+    constructor.assert_called_once()
+    assert constructor.call_args.kwargs["max_tokens"] == 1536
 
 
 def test_create_chat_model_litellm():
-    mock_litellm_pkg = MagicMock(ChatLiteLLM=MagicMock(return_value=MagicMock()))
+    constructor = MagicMock(return_value=MagicMock())
+    mock_litellm_pkg = MagicMock(ChatLiteLLM=constructor)
     with _mock_modules(langchain_litellm=mock_litellm_pkg):
-        config = _config("litellm", model="openai/gpt-4.1-mini", api_key=None)
+        config = _config(
+            "litellm",
+            model="openai/gpt-4.1-mini",
+            api_key=None,
+            max_tokens=768,
+        )
         model = create_chat_model(config)
         assert model is not None
+
+    constructor.assert_called_once()
+    assert constructor.call_args.kwargs["max_tokens"] == 768
 
 
 def test_create_chat_model_unsupported_raises():

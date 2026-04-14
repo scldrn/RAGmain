@@ -97,6 +97,11 @@ def test_settings_reject_temperature_below_range():
         _google_settings(chat_temperature=-0.1)
 
 
+def test_settings_reject_chat_max_tokens_zero():
+    with pytest.raises(ConfigurationError):
+        _google_settings(chat_max_tokens=0)
+
+
 def test_settings_reject_max_rewrites_zero():
     with pytest.raises(ConfigurationError):
         _google_settings(max_rewrites=0)
@@ -123,6 +128,11 @@ def test_settings_reject_invalid_ingestion_mode():
 def test_settings_reject_invalid_retrieval_mode():
     with pytest.raises(ConfigurationError):
         _google_settings(retrieval_mode="sparse")
+
+
+def test_settings_reject_empty_collection_name():
+    with pytest.raises(ConfigurationError):
+        _google_settings(collection_name="   ")
 
 
 def test_settings_reject_empty_source_urls():
@@ -197,6 +207,23 @@ def test_default_embedding_model_returns_none_without_provider(monkeypatch):
     assert default_embedding_model() is None
 
 
+def test_settings_reads_cors_allow_origins_from_env(monkeypatch):
+    monkeypatch.setenv("CORS_ALLOW_ORIGINS", "https://app.example, http://localhost:3000")
+
+    settings = AgenticRagSettings(
+        chat_provider="google",
+        chat_model="gemini-2.5-flash",
+        chat_api_key="key",
+        embedding_provider="google",
+        embedding_model="gemini-embedding-2-preview",
+    )
+
+    assert settings.cors_allow_origins == (
+        "https://app.example",
+        "http://localhost:3000",
+    )
+
+
 def test_read_int_env_raises_on_non_numeric(monkeypatch):
     monkeypatch.setenv("MAX_REWRITES", "not-a-number")
     with pytest.raises(ConfigurationError):
@@ -207,6 +234,32 @@ def test_read_int_env_raises_on_non_numeric(monkeypatch):
             embedding_provider="google",
             embedding_model="gemini-embedding-2-preview",
         )
+
+
+def test_read_chat_max_tokens_env_raises_on_non_numeric(monkeypatch):
+    monkeypatch.setenv("CHAT_MAX_TOKENS", "not-a-number")
+    with pytest.raises(ConfigurationError):
+        AgenticRagSettings(
+            chat_provider="google",
+            chat_model="gemini-2.5-flash",
+            chat_api_key="key",
+            embedding_provider="google",
+            embedding_model="gemini-embedding-2-preview",
+        )
+
+
+def test_settings_default_chat_max_tokens_is_none_when_unset(monkeypatch):
+    monkeypatch.delenv("CHAT_MAX_TOKENS", raising=False)
+
+    settings = AgenticRagSettings(
+        chat_provider="google",
+        chat_model="gemini-2.5-flash",
+        chat_api_key="key",
+        embedding_provider="google",
+        embedding_model="gemini-embedding-2-preview",
+    )
+
+    assert settings.chat_max_tokens is None
 
 
 def test_settings_reject_invalid_embedding_provider():
